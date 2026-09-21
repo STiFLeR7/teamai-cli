@@ -2017,12 +2017,12 @@ async function reportPostPullChecks(
     // registry is built, which is where the I/O actually is. The `'pull'`
     // stage leaves out the two that would spend it — rules read every file per
     // tool, agents parse every spec — so the cheap ones still get to run.
-    const results = await withTimeout(
+    const { local, results } = await withTimeout(
       (async () => {
         const local = (await buildChecks(ctx, 'pull'))
           .filter((c) => c.source === 'local')
           .filter((c) => !c.reportedByPull || !reported.has(c.reportedByPull));
-        return runChecks(local);
+        return { local, results: await runChecks(local) };
       })(),
       POST_PULL_CHECKS_TIMEOUT_MS,
       `Post-pull checks are still running after ${POST_PULL_CHECKS_TIMEOUT_MS}ms`,
@@ -2031,10 +2031,25 @@ async function reportPostPullChecks(
     const failures = results.filter((r) => !r.ok);
     if (failures.length === 0) return;
 
-    log.warn(`Pull finished, but ${failures.length} check(s) failed:`);
-    for (const failure of failures) {
+    // A check marked `informational` (e.g. a stale leftover file) is a
+    // cleanup opportunity, not a sign the pull that just ran did anything
+    // wrong — it must not turn a genuinely healthy delivery into "Pull
+    // finished, but N check(s) failed" (#693 review round 6).
+    const informationalNames = new Set(local.filter((c) => c.informational).map((c) => c.name));
+    const blocking = failures.filter((f) => !informationalNames.has(f.name));
+    const informational = failures.filter((f) => informationalNames.has(f.name));
+
+    if (blocking.length > 0) {
+      log.warn(`Pull finished, but ${blocking.length} check(s) failed:`);
+      for (const failure of blocking) {
+        const [headline, ...detail] = formatCheckResult(failure);
+        log.warn(headline);
+        for (const line of detail) log.dim(line);
+      }
+    }
+    for (const failure of informational) {
       const [headline, ...detail] = formatCheckResult(failure);
-      log.warn(headline);
+      log.dim(headline);
       for (const line of detail) log.dim(line);
     }
     log.dim('  Run `teamai doctor` for the full report.');

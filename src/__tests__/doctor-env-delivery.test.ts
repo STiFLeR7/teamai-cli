@@ -190,6 +190,28 @@ describe('doctor — env variables reach a shell', () => {
     expect(await (await staleBlockCheck()).check()).toBe(true);
   });
 
+  // Regression (#693 review round 6): `shellProfilePath` is user-supplied and
+  // may use forward slashes (or, on Windows, different case) even though the
+  // stray-block scan's own candidate is built with `path.join`, which uses
+  // the host's native separator. A raw string comparison between the two
+  // told the check its own resolved file was a stray copy of itself whenever
+  // the two spellings of the same path did not match byte-for-byte.
+  it('does not report shellProfilePath as a stray copy of itself when its spelling differs by separator', async () => {
+    await writeEnvSh("export JIRA_PASSWORD='s3cret'\n");
+    // path.join(homeDir, '.profile') is native-separated; this override names
+    // the same file with forward slashes throughout, which on a POSIX host is
+    // already identical and on Windows is the exact shape the review reported.
+    teamConfig.sharing.env.shellProfilePath = path.join(homeDir, '.profile').split(path.sep).join('/');
+    const profileShPosix = envShPath.split(path.sep).join('/');
+    await fse.writeFile(
+      path.join(homeDir, '.profile'),
+      `# [teamai:env:start]\n# DO NOT EDIT\n[ -f '${profileShPosix}' ] && source '${profileShPosix}'\n# [teamai:env:end]\n`,
+    );
+
+    expect(await (await envCheck()).check()).toBe(true);
+    expect(await (await staleBlockCheck()).check()).toBe(true);
+  });
+
   it('fails and names `variables:` for the shorthand env.yaml form (#662)', async () => {
     await writeEnvYaml('JIRA_PASSWORD: "s3cret"\n');
     await writeEnvSh('');

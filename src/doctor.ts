@@ -47,6 +47,14 @@ export interface Check {
    * only voice left and must be heard.
    */
   reportedByPull?: string;
+  /**
+   * True for a check whose failure is a cleanup opportunity, not a sign that
+   * anything a user asked for is actually broken. `doctor` still reports it
+   * like any other check; `pull`'s post-pull summary excludes it from the
+   * "N check(s) failed" count so a healthy delivery is not announced as
+   * broken because of unrelated leftover state (#693 review round 6).
+   */
+  informational?: boolean;
   check: () => Promise<boolean>;
   fix?: string;
 }

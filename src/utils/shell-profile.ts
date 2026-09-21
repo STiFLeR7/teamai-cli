@@ -81,6 +81,26 @@ function toGeneratedForm(envShPath: string): string {
 }
 
 /**
+ * Whether two paths name the same file on disk, independent of separator
+ * style or (on Windows) case.
+ *
+ * Resolved with `path.win32`/`path.posix` explicitly rather than the ambient
+ * `path` — both normalize `/` and `\` to one separator either way, but only
+ * an explicit choice lets a test exercise the win32 branch on ubuntu/macos CI
+ * (same reason `platform` is injectable elsewhere in this file). An override
+ * written as `C:/Users/me/.profile` then compares equal to the generated
+ * candidate `path.join(home, '.profile')`, which is backslash-separated on
+ * win32. Windows filesystems are case-insensitive, so a case difference alone
+ * must not make two paths look distinct there either (#693 review round 6).
+ */
+export function sameFile(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {
+  const resolve = platform === 'win32' ? path.win32.resolve : path.posix.resolve;
+  const left = resolve(a);
+  const right = resolve(b);
+  return platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+/**
  * Quote a string so it is safe to interpolate into a POSIX shell (bash/zsh/sh).
  * Wraps the value in single quotes and encodes any embedded single quote as
  * `'\''`, leaving all other characters (including `"`, `$`, `` ` ``, `\`)

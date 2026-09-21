@@ -6,6 +6,7 @@ import {
   detectShellProfile,
   envBlockSourcesPath,
   envBlockReferencesDataHome,
+  sameFile,
   shellQuoteValue,
 } from '../utils/shell-profile.js';
 
@@ -148,5 +149,33 @@ describe('envBlockReferencesDataHome', () => {
     const otherPosix = 'D:/some-other-project/.teamai/env.sh';
     const block = `[ -f ${shellQuoteValue(otherPosix)} ] && source ${shellQuoteValue(otherPosix)}`;
     expect(envBlockReferencesDataHome(block, envShPath)).toBe(false);
+  });
+});
+
+// Regression (#693 review round 6): the stray-block scan compares a
+// user-supplied `shellProfilePath` override against a `path.join`-built
+// candidate. A raw `===` made a valid override a false positive "stray copy
+// of itself" whenever the two spellings of the same path did not match
+// byte-for-byte — an override with forward slashes, or (Windows only) a
+// different case.
+describe('sameFile', () => {
+  it('matches a forward-slash override against a backslash candidate on win32', () => {
+    expect(sameFile('C:/Users/me/.profile', 'C:\\Users\\me\\.profile', 'win32')).toBe(true);
+  });
+
+  it('matches regardless of case on win32', () => {
+    expect(sameFile('C:\\Users\\Me\\.profile', 'c:\\users\\me\\.profile', 'win32')).toBe(true);
+  });
+
+  it('does not match a genuinely different file on win32', () => {
+    expect(sameFile('C:\\Users\\me\\.profile', 'C:\\Users\\me\\.bashrc', 'win32')).toBe(false);
+  });
+
+  it('is case-sensitive on posix, where a case difference is a different file', () => {
+    expect(sameFile('/home/me/.profile', '/home/me/.PROFILE', 'linux')).toBe(false);
+  });
+
+  it('matches identical posix paths', () => {
+    expect(sameFile('/home/me/.profile', '/home/me/.profile', 'linux')).toBe(true);
   });
 });

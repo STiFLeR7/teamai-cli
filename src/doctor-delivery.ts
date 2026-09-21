@@ -11,6 +11,7 @@ import {
   extractEnvBlock,
   envBlockSourcesPath,
   envBlockReferencesDataHome,
+  sameFile,
   SHELL_PROFILE_CANDIDATE_NAMES,
 } from './utils/shell-profile.js';
 import { getUserHome } from './utils/home.js';
@@ -527,6 +528,7 @@ export async function buildEnvDeliveryCheck(ctx: DoctorContext): Promise<Check[]
     {
       name: 'No stale env blocks left behind',
       source: 'local',
+      informational: true,
       check: async () => staleProfiles.length === 0,
       fix: staleProfiles.length === 0
         ? undefined
@@ -622,7 +624,7 @@ async function envDeliveryProblems(
   const staleProfiles: string[] = [];
   for (const name of SHELL_PROFILE_CANDIDATE_NAMES) {
     const candidate = path.join(home, name);
-    if (candidate === profilePath) continue;
+    if (sameFile(candidate, profilePath)) continue;
     const content = await readFileSafe(candidate);
     const strayBlock = content ? extractEnvBlock(content) : null;
     if (strayBlock && envBlockReferencesDataHome(strayBlock, envShPath)) {
