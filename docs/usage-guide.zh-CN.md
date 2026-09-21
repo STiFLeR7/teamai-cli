@@ -716,6 +716,8 @@ teamai env list
 teamai push
 ```
 
+`pull` 时，若启用了 `injectShellProfile`（默认启用），`$SHELL` 为 zsh 时环境变量块会写入 `~/.zshrc`，否则写入 `~/.bashrc`——但 Windows 上例外：`$SHELL` 通常未设置，而 Git Bash 以*登录 shell*方式启动，从不读取 `.bashrc`，因此 teamai 会优先选择已存在的 `~/.bash_profile`、其次 `~/.bash_login`、再次 `~/.profile`，只有三者都不存在时才回退到 `~/.bashrc`（通过 MSYS2/Cygwin 安装、会设置 `$SHELL` 的 zsh 仍会解析到 `.zshrc`）。可通过 `teamai.yaml` 中的 `sharing.env.shellProfilePath` 覆盖目标文件。
+
 ### Docs（文档）
 
 将文档放入团队仓库 `docs/` 目录，push 后团队成员 pull 时自动同步。
@@ -1723,7 +1725,7 @@ teamai uninstall --agent claude
 - 团队同步的 skills，包括 OpenClaw workspace skills（保留用户自建 skills）
 - 团队同步的 rules
 - 团队同步的自定义 agents 和 CLI 内置 agents（保留用户自建 agents）
-- Shell profile 中的 env 块
+- Shell profile 中的 env 块——会清理每一个候选文件（`.zshrc`、`.bashrc`、`.bash_profile`、`.bash_login`、`.profile`）中、代码块指向本作用域自身 `env.sh` 的那些，而不仅仅是当前 `pull` 会选中的那一个；指向其他作用域 `env.sh` 的代码块不受影响
 - `~/.teamai/` 目录
 
 ### 只卸载单个工具（`--agent <tool>`）

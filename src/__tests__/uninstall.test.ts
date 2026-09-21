@@ -156,14 +156,17 @@ async function setupFixture(tmpDir: string) {
   ].join('\n');
   await fse.writeFile(path.join(homeDir, '.claude', 'CLAUDE.md'), claudeMd);
 
-  // Shell profile with env block
+  // Shell profile with env block. The source line points at this scope's own
+  // env.sh (not a `~` shorthand) since uninstall now only cleans a block that
+  // sources the current scope's data home (#693 review).
+  const envShPosix = path.join(homeDir, '.teamai', 'env.sh').split(path.sep).join('/');
   const zshrc = [
     '# My zshrc config',
     'export PATH=$HOME/bin:$PATH',
     '',
     TEAMAI_ENV_START,
     '# DO NOT EDIT',
-    '[ -f ~/.teamai/env.sh ] && source ~/.teamai/env.sh',
+    `[ -f '${envShPosix}' ] && source '${envShPosix}'`,
     TEAMAI_ENV_END,
     '',
     '# More user config',
@@ -264,12 +267,16 @@ describe('uninstall', () => {
     vi.stubEnv('SHELL', '');
     vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
 
+    // Both blocks source THIS scope's own env.sh — only their file location
+    // differs, exactly like an upgrade across #682 would leave things.
+    const envShPosix = path.join(homeDir, '.teamai', 'env.sh').split(path.sep).join('/');
+
     // Stale block: what an older CLI wrote to .bashrc before #682.
     const staleBashrc = [
       '# my bashrc',
       TEAMAI_ENV_START,
       '# DO NOT EDIT',
-      '[ -f ~/.teamai/env.sh ] && source ~/.teamai/env.sh',
+      `[ -f '${envShPosix}' ] && source '${envShPosix}'`,
       TEAMAI_ENV_END,
     ].join('\n');
     await fse.writeFile(path.join(homeDir, '.bashrc'), staleBashrc);
@@ -279,7 +286,7 @@ describe('uninstall', () => {
       '# my profile',
       TEAMAI_ENV_START,
       '# DO NOT EDIT',
-      '[ -f ~/.teamai/env.sh ] && source ~/.teamai/env.sh',
+      `[ -f '${envShPosix}' ] && source '${envShPosix}'`,
       TEAMAI_ENV_END,
     ].join('\n');
     await fse.writeFile(path.join(homeDir, '.profile'), currentProfile);
@@ -304,6 +311,46 @@ describe('uninstall', () => {
     const profile = await fse.readFile(path.join(homeDir, '.profile'), 'utf-8');
     expect(profile).toContain('# my profile');
     expect(profile).not.toContain(TEAMAI_ENV_START);
+  });
+
+  // Regression (#693 review): scanning every candidate filename must not
+  // delete a DIFFERENT scope's still-active block just because it also
+  // happens to carry the teamai marker — only a block sourcing THIS scope's
+  // own env.sh may be touched.
+  it('leaves another scope\'s env block untouched even though it shares a candidate filename', async () => {
+    const { homeDir, repoPath, teamaiHome } = await setupFixture(tmpDir);
+    vi.stubEnv('HOME', homeDir);
+    vi.stubEnv('SHELL', '');
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+
+    // A project scope's block, unrelated to the user-scope uninstall below.
+    const otherProjectEnvSh = path.join(tmpDir, 'other-project', '.teamai', 'env.sh')
+      .split(path.sep).join('/');
+    const bashrc = [
+      '# my bashrc',
+      TEAMAI_ENV_START,
+      '# DO NOT EDIT',
+      `[ -f '${otherProjectEnvSh}' ] && source '${otherProjectEnvSh}'`,
+      TEAMAI_ENV_END,
+    ].join('\n');
+    await fse.writeFile(path.join(homeDir, '.bashrc'), bashrc);
+
+    const teamConfig = makeTeamConfig({
+      sharing: {
+        skills: {},
+        rules: { enforced: [] },
+        docs: { localDir: `${teamaiHome}/docs` },
+        env: { injectShellProfile: true },
+      },
+    });
+    const localConfig = makeLocalConfig(homeDir, repoPath); // scope: 'user'
+    mockAutoDetectInit.mockResolvedValue({ localConfig, teamConfig });
+
+    await uninstall({ force: true });
+
+    // The unrelated project-scope block must survive intact.
+    const bashrcAfter = await fse.readFile(path.join(homeDir, '.bashrc'), 'utf-8');
+    expect(bashrcAfter).toBe(bashrc);
   });
 
   // Regression: Cursor rules are `.mdc`; matching only `.md` left every team

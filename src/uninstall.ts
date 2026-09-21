@@ -53,7 +53,12 @@ import {
 import { log } from './utils/logger.js';
 import { askConfirmation } from './utils/prompt.js';
 import { getUserHome } from './utils/home.js';
-import { detectShellProfile } from './utils/shell-profile.js';
+import {
+  detectShellProfile,
+  extractEnvBlock,
+  envBlockSourcesPath,
+  SHELL_PROFILE_CANDIDATE_NAMES,
+} from './utils/shell-profile.js';
 
 // ─── Types ─────────────────────────────────────────────
 
@@ -131,9 +136,6 @@ const CLAUDEMD_MARKER_PAIRS: Array<[string, string]> = [
   [TEAMAI_CLAUDEMD_START, TEAMAI_CLAUDEMD_END],
   [TEAMAI_RECALL_RULES_START, TEAMAI_RECALL_RULES_END],
 ];
-
-/** Every profile file `detectShellProfile()` could ever have resolved to, across platforms and CLI versions. */
-const SHELL_PROFILE_CANDIDATE_NAMES = ['.zshrc', '.bashrc', '.bash_profile', '.bash_login', '.profile'];
 
 /**
  * Collect team repo skill names, handling both flat and namespaced layouts.
@@ -518,17 +520,24 @@ async function buildRemovalPlan(
     // machine last pulled with an older CLI can carry a stale block in a file
     // the current resolution no longer points at, and a plain uninstall would
     // silently leave that managed block behind.
+    //
+    // A candidate only counts if its block actually sources THIS scope's
+    // env.sh (envBlockSourcesPath) — matching on the marker alone would let
+    // this uninstall delete a different scope's still-active block just
+    // because it also happens to live in one of the candidate filenames.
     const configuredProfilePath = teamConfig.sharing.env.shellProfilePath
       ? expandHome(teamConfig.sharing.env.shellProfilePath)
       : await detectShellProfile();
     const home = getUserHome();
+    const envShPath = path.join(getDataHome(localConfig), 'env.sh');
     const candidateProfilePaths = Array.from(new Set([
       configuredProfilePath,
       ...SHELL_PROFILE_CANDIDATE_NAMES.map((name) => path.join(home, name)),
     ]));
     for (const candidate of candidateProfilePaths) {
       const profileContent = await readFileSafe(candidate);
-      if (profileContent && profileContent.includes(TEAMAI_ENV_START)) {
+      const block = profileContent ? extractEnvBlock(profileContent) : null;
+      if (block && envBlockSourcesPath(block, envShPath)) {
         plan.shellProfiles.push(candidate);
       }
     }

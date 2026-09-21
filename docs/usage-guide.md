@@ -743,6 +743,8 @@ teamai env list
 teamai push
 ```
 
+On `pull`, when `injectShellProfile` is enabled (default), the env block goes into `~/.zshrc` if `$SHELL` is zsh, otherwise `~/.bashrc` — except on Windows: `$SHELL` is normally unset there, and Git Bash starts as a *login* shell that never reads `.bashrc`, so teamai instead prefers an existing `~/.bash_profile`, then `~/.bash_login`, then `~/.profile`, falling back to `~/.bashrc` only when none of them exist (a zsh installed via MSYS2/Cygwin, which does set `$SHELL`, still resolves to `.zshrc`). Override the target file with `sharing.env.shellProfilePath` in `teamai.yaml`.
+
 ### Docs
 
 Place documentation in the team repo's `docs/` directory; after pushing, team members will automatically receive it on their next `pull`.
@@ -1775,7 +1777,7 @@ What gets removed:
 - Team-synced skills, including OpenClaw workspace skills (your own skills are preserved)
 - Team-synced rules
 - Team-synced custom agents and CLI built-in agents (your own agents are preserved)
-- The env block in your shell profile
+- The env block in your shell profile — every candidate file (`.zshrc`, `.bashrc`, `.bash_profile`, `.bash_login`, `.profile`) carrying a block that sources this scope's own `env.sh` is cleaned, not only the one file `pull` would choose today; a block sourcing a different scope's `env.sh` is left alone
 - The `~/.teamai/` directory
 
 ### Uninstall a single tool (`--agent <tool>`)
