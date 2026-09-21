@@ -253,6 +253,59 @@ describe('uninstall', () => {
     expect(await fse.pathExists(teamaiHome)).toBe(false);
   });
 
+  // Regression (#693 review): the Windows fix in #682 changed which profile
+  // file `pull` prefers, so a machine last pulled with an older CLI can carry
+  // a stale env block in a file the current detectShellProfile() resolution
+  // no longer points at (a fresh pull then adds a second block elsewhere).
+  // uninstall must find and clean every such file, not only the current one.
+  it('cleans a stale env block left in an old profile file alongside the current one', async () => {
+    const { homeDir, repoPath, teamaiHome } = await setupFixture(tmpDir);
+    vi.stubEnv('HOME', homeDir);
+    vi.stubEnv('SHELL', '');
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+
+    // Stale block: what an older CLI wrote to .bashrc before #682.
+    const staleBashrc = [
+      '# my bashrc',
+      TEAMAI_ENV_START,
+      '# DO NOT EDIT',
+      '[ -f ~/.teamai/env.sh ] && source ~/.teamai/env.sh',
+      TEAMAI_ENV_END,
+    ].join('\n');
+    await fse.writeFile(path.join(homeDir, '.bashrc'), staleBashrc);
+
+    // Current block: what the fixed CLI writes to .profile today.
+    const currentProfile = [
+      '# my profile',
+      TEAMAI_ENV_START,
+      '# DO NOT EDIT',
+      '[ -f ~/.teamai/env.sh ] && source ~/.teamai/env.sh',
+      TEAMAI_ENV_END,
+    ].join('\n');
+    await fse.writeFile(path.join(homeDir, '.profile'), currentProfile);
+
+    const teamConfig = makeTeamConfig({
+      sharing: {
+        skills: {},
+        rules: { enforced: [] },
+        docs: { localDir: `${teamaiHome}/docs` },
+        env: { injectShellProfile: true },
+      },
+    });
+    const localConfig = makeLocalConfig(homeDir, repoPath);
+    mockAutoDetectInit.mockResolvedValue({ localConfig, teamConfig });
+
+    await uninstall({ force: true });
+
+    const bashrc = await fse.readFile(path.join(homeDir, '.bashrc'), 'utf-8');
+    expect(bashrc).toContain('# my bashrc');
+    expect(bashrc).not.toContain(TEAMAI_ENV_START);
+
+    const profile = await fse.readFile(path.join(homeDir, '.profile'), 'utf-8');
+    expect(profile).toContain('# my profile');
+    expect(profile).not.toContain(TEAMAI_ENV_START);
+  });
+
   // Regression: Cursor rules are `.mdc`; matching only `.md` left every team
   // rule on disk after uninstall, still injected into each Cursor session.
   it('removes cursor .mdc rules (and a legacy .md copy) on uninstall', async () => {

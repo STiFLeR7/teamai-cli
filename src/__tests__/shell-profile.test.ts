@@ -44,10 +44,16 @@ describe('detectShellProfile', () => {
   });
 
   describe('Windows (win32)', () => {
-    it('falls back to .bashrc when none of the login-shell files exist', async () => {
-      // SHELL is never set on Windows; this also proves the branch ignores
-      // it even when something has set it.
-      vi.stubEnv('SHELL', '/bin/zsh');
+    it('returns .zshrc when SHELL is zsh, even on win32 (MSYS2/Cygwin zsh)', async () => {
+      // A zsh installed via MSYS2/Cygwin sets SHELL just like it does on
+      // POSIX, while native Windows Node still reports platform === win32.
+      // SHELL-based detection must win here, or this setup regresses.
+      vi.stubEnv('SHELL', '/usr/bin/zsh');
+      expect(await detectShellProfile('win32')).toBe(path.join(homeDir, '.zshrc'));
+    });
+
+    it('falls back to .bashrc when SHELL is unset and none of the login-shell files exist', async () => {
+      vi.stubEnv('SHELL', '');
       expect(await detectShellProfile('win32')).toBe(path.join(homeDir, '.bashrc'));
     });
 
