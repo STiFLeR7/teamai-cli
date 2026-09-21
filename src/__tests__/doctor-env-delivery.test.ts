@@ -132,18 +132,41 @@ describe('doctor — env variables reach a shell', () => {
       path.join(homeDir, '.profile'),
       `# [teamai:env:start]\n# DO NOT EDIT\n[ -f ${envShPath} ] && source ${envShPath}\n# [teamai:env:end]\n`,
     );
-    // A pre-#661 legacy block for the SAME env.sh, left behind in .bashrc —
-    // raw, unquoted, unconverted backslashes.
-    const windowsEnvSh = envShPath.replace(/\//g, '\\');
+    // A legacy block for the SAME env.sh, left behind in .bashrc — raw and
+    // unquoted (the current generator always quotes via shellQuoteValue, so
+    // an unquoted block is necessarily from an older write path). Windows-
+    // specific legacy spellings (backslash, MSYS drive form) are covered
+    // directly in shell-profile.test.ts's envBlockReferencesDataHome suite,
+    // with explicit Windows-shaped test data rather than a host-dependent
+    // string transform of this test's own (POSIX-on-CI) envShPath.
     await fse.writeFile(
       path.join(homeDir, '.bashrc'),
-      `# my bashrc\n# [teamai:env:start]\n# DO NOT EDIT\n[ -f ${windowsEnvSh} ] && source ${windowsEnvSh}\n# [teamai:env:end]\n`,
+      `# my bashrc\n# [teamai:env:start]\n# DO NOT EDIT\n[ -f ${envShPath} ] && source ${envShPath}\n# [teamai:env:end]\n`,
     );
 
     const check = await envCheck();
     expect(await check.check()).toBe(false);
     expect(check.fix).toContain('.bashrc');
     expect(check.fix).toContain('teamai uninstall');
+  });
+
+  // Regression (#693 review round 4): an unexpanded `~/...` override made
+  // the stray-block scan compare a literal `~/.profile` string against its
+  // own always-absolute candidate paths, so the resolved file never matched
+  // itself and got reported as a stray copy of its own valid block.
+  it('does not report shellProfilePath\'s own file as a stray copy of itself', async () => {
+    await writeEnvSh("export JIRA_PASSWORD='s3cret'\n");
+    teamConfig.sharing.env.shellProfilePath = '~/.profile';
+    // The generator always writes the forward-slash form; envShPath is a
+    // native OS path (backslashes on a Windows dev host), so convert it the
+    // same way generateShellBlock does before writing this test fixture.
+    const profileShPosix = envShPath.split(path.sep).join('/');
+    await fse.writeFile(
+      path.join(homeDir, '.profile'),
+      `# [teamai:env:start]\n# DO NOT EDIT\n[ -f '${profileShPosix}' ] && source '${profileShPosix}'\n# [teamai:env:end]\n`,
+    );
+
+    expect(await (await envCheck()).check()).toBe(true);
   });
 
   it('fails and names `variables:` for the shorthand env.yaml form (#662)', async () => {

@@ -571,8 +571,15 @@ async function envDeliveryProblems(ctx: DoctorContext): Promise<string[]> {
     }
   }
 
-  // Same resolution the injection runs, not a second copy of it.
-  const profilePath = teamConfig?.sharing?.env?.shellProfilePath ?? await envHandler.detectShellProfile();
+  // Same resolution the injection runs, not a second copy of it. Expanded
+  // up front (not left to readFileSafe's internal expansion) because the
+  // stray-block scan below compares this string for identity against
+  // candidates that are always absolute — an unexpanded `~/...` override
+  // would never match its own resolved file and get reported as a stray
+  // copy of itself (#693 review round 4).
+  const profilePath = expandHome(
+    teamConfig?.sharing?.env?.shellProfilePath ?? await envHandler.detectShellProfile(),
+  );
   const profile = await readFileSafe(profilePath);
   const block = profile === null ? null : extractEnvBlock(profile);
 

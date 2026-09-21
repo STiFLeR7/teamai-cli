@@ -6,7 +6,11 @@ import type { ResourceItem, TeamaiConfig, LocalConfig } from '../types.js';
 import { TEAMAI_ENV_START, TEAMAI_ENV_END, getDataHome, getEnvBackupPath, isSelfMode } from '../types.js';
 import { pathExists, readFileSafe, writeFile, ensureDir, fileContentEqual } from '../utils/fs.js';
 import { log } from '../utils/logger.js';
-import { detectShellProfile as resolveShellProfilePath, shellQuoteValue } from '../utils/shell-profile.js';
+import {
+  detectShellProfile as resolveShellProfilePath,
+  shellQuoteValue,
+  isWindowsFormPath,
+} from '../utils/shell-profile.js';
 
 // ─── Schema for env.yaml ────────────────────────────────
 
@@ -75,18 +79,6 @@ export function describeEnvYamlShapeProblem(raw: unknown): string | null {
 export function maskEnvValue(value: string): string {
   if (value.length < 4) return '****';
   return `${value.slice(0, 2)}****`;
-}
-
-/**
- * True for a path a shell must read the Windows way: a drive-letter path
- * (`C:\...` or `C:/...`) or a UNC path (`\\server\share`).
- *
- * A POSIX path is deliberately excluded: there a backslash is an ordinary
- * filename character, not a separator, so collapsing every one of them would
- * silently point the shell at a different directory.
- */
-function isWindowsFormPath(value: string): boolean {
-  return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\');
 }
 
 /**

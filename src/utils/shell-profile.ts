@@ -58,6 +58,29 @@ export async function detectShellProfile(
 }
 
 /**
+ * True for a path a shell must read the Windows way: a drive-letter path
+ * (`C:\...` or `C:/...`) or a UNC path (`\\server\share`).
+ *
+ * A POSIX path is deliberately excluded: there a backslash is an ordinary
+ * filename character, not a separator, so collapsing every one of them would
+ * silently point the shell at a different directory.
+ *
+ * Shape-based, not `path.sep`-based: `envShPath` was built by `path.join` on
+ * whichever host wrote it, and a check that reads the *current* host's
+ * separator is a no-op for a Windows-shaped path inspected from a POSIX host
+ * (or vice versa) — the very thing this file's own tests need to exercise,
+ * since CI only runs ubuntu/macos (#693 review round 4).
+ */
+export function isWindowsFormPath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\');
+}
+
+/** `envShPath` rewritten to the forward-slash form the generator writes, regardless of which host built it. */
+function toGeneratedForm(envShPath: string): string {
+  return isWindowsFormPath(envShPath) ? envShPath.replace(/\\/g, '/') : envShPath;
+}
+
+/**
  * Quote a string so it is safe to interpolate into a POSIX shell (bash/zsh/sh).
  * Wraps the value in single quotes and encodes any embedded single quote as
  * `'\''`, leaving all other characters (including `"`, `$`, `` ` ``, `\`)
@@ -93,7 +116,7 @@ export function extractEnvBlock(profileContent: string): string | null {
  * against that same rewritten form, not the raw OS path.
  */
 export function envBlockSourcesPath(block: string, envShPath: string): boolean {
-  const posixPath = envShPath.split(path.sep).join('/');
+  const posixPath = toGeneratedForm(envShPath);
 
   // The generator (generateShellBlock) always wraps the path in single
   // quotes via shellQuoteValue, which escapes an embedded apostrophe as
@@ -122,7 +145,7 @@ export function envBlockSourcesPath(block: string, envShPath: string): boolean {
  * them permanently invisible to both `doctor` and `uninstall` (#693 review).
  */
 function candidateSpellings(envShPath: string): string[] {
-  const spellings = new Set<string>([envShPath, envShPath.split(path.sep).join('/')]);
+  const spellings = new Set<string>([envShPath, toGeneratedForm(envShPath)]);
 
   const drive = /^([A-Za-z]):[\\/](.*)$/.exec(envShPath);
   if (drive) {
