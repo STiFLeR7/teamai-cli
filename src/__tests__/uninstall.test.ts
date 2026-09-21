@@ -191,10 +191,16 @@ describe('uninstall', () => {
     mockReconcileHooks.mockReset();
     mockSaveLocalConfig.mockReset();
     mockSaveLocalConfigForScope.mockReset();
+    // These tests exercise the SHELL-based POSIX branch of detectShellProfile
+    // via stubbed SHELL values; pin the platform so they assert the same
+    // thing on a Windows dev machine as they do in CI (ubuntu/macos). The
+    // win32 branch has its own tests in shell-profile.test.ts.
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
   });
 
   afterEach(async () => {
     vi.unstubAllEnvs();
+    vi.restoreAllMocks();
     await fse.remove(tmpDir);
   });
 

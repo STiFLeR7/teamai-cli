@@ -6,7 +6,7 @@ import type { ResourceItem, TeamaiConfig, LocalConfig } from '../types.js';
 import { TEAMAI_ENV_START, TEAMAI_ENV_END, getDataHome, getEnvBackupPath, isSelfMode } from '../types.js';
 import { pathExists, readFileSafe, writeFile, ensureDir, fileContentEqual } from '../utils/fs.js';
 import { log } from '../utils/logger.js';
-import { getUserHome } from '../utils/home.js';
+import { detectShellProfile as resolveShellProfilePath } from '../utils/shell-profile.js';
 
 // ─── Schema for env.yaml ────────────────────────────────
 
@@ -280,7 +280,7 @@ export class EnvHandler extends ResourceHandler {
     if (inject) {
       const profilePath = teamConfig.sharing.env.shellProfilePath
         ? teamConfig.sharing.env.shellProfilePath
-        : this.detectShellProfile();
+        : await this.detectShellProfile();
 
       const shellBlock = this.generateShellBlock(teamaiHome);
       await this.injectShellProfile(profilePath, shellBlock);
@@ -430,16 +430,12 @@ export class EnvHandler extends ResourceHandler {
    *
    * Public because `doctor` has to check the same file the injection writes:
    * a second spelling of this choice would check `.bashrc` while the pull
-   * wrote `.zshrc`, and report a correct install as broken.
+   * wrote `.zshrc`, and report a correct install as broken. Delegates to the
+   * shared `utils/shell-profile.js` so `teamai uninstall` resolves the same
+   * file too (#682).
    */
-  detectShellProfile(): string {
-    const home = getUserHome();
-    const shell = process.env.SHELL ?? '';
-
-    if (shell.includes('zsh')) {
-      return path.join(home, '.zshrc');
-    }
-    return path.join(home, '.bashrc');
+  detectShellProfile(platform: NodeJS.Platform = process.platform): Promise<string> {
+    return resolveShellProfilePath(platform);
   }
 
   /**

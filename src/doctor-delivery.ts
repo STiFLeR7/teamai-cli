@@ -591,7 +591,7 @@ async function envDeliveryProblems(ctx: DoctorContext): Promise<string[]> {
   }
 
   // Same resolution the injection runs, not a second copy of it.
-  const profilePath = teamConfig?.sharing?.env?.shellProfilePath ?? envHandler.detectShellProfile();
+  const profilePath = teamConfig?.sharing?.env?.shellProfilePath ?? await envHandler.detectShellProfile();
   const profile = await readFileSafe(profilePath);
   const block = profile === null ? null : envBlockIn(profile);
 

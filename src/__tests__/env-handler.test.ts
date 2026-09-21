@@ -54,6 +54,10 @@ describe('EnvHandler', () => {
 
     vi.stubEnv('HOME', homeDir);
     vi.stubEnv('SHELL', '/bin/bash');
+    // These tests exercise the SHELL-based POSIX branch of detectShellProfile;
+    // pin the platform so they assert the same thing on a Windows dev machine
+    // as they do in CI (ubuntu/macos). The win32 branch has its own tests.
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
 
     teamConfig = {
       team: 'test',
@@ -81,6 +85,7 @@ scope: 'user',
 
   afterEach(async () => {
     vi.unstubAllEnvs();
+    vi.restoreAllMocks();
     await fse.remove(tmpDir);
   });
 

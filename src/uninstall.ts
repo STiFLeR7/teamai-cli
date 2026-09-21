@@ -53,6 +53,7 @@ import {
 import { log } from './utils/logger.js';
 import { askConfirmation } from './utils/prompt.js';
 import { getUserHome } from './utils/home.js';
+import { detectShellProfile } from './utils/shell-profile.js';
 
 // ─── Types ─────────────────────────────────────────────
 
@@ -130,15 +131,6 @@ const CLAUDEMD_MARKER_PAIRS: Array<[string, string]> = [
   [TEAMAI_CLAUDEMD_START, TEAMAI_CLAUDEMD_END],
   [TEAMAI_RECALL_RULES_START, TEAMAI_RECALL_RULES_END],
 ];
-
-function detectShellProfile(): string {
-  const home = getUserHome();
-  const shell = process.env.SHELL ?? '';
-  if (shell.includes('zsh')) {
-    return path.join(home, '.zshrc');
-  }
-  return path.join(home, '.bashrc');
-}
 
 /**
  * Collect team repo skill names, handling both flat and namespaced layouts.
@@ -520,7 +512,7 @@ async function buildRemovalPlan(
     // (e) Shell profile env block
     const shellProfilePath = teamConfig.sharing.env.shellProfilePath
       ? expandHome(teamConfig.sharing.env.shellProfilePath)
-      : detectShellProfile();
+      : await detectShellProfile();
     if (shellProfilePath) {
       const profileContent = await readFileSafe(shellProfilePath);
       if (profileContent && profileContent.includes(TEAMAI_ENV_START)) {
