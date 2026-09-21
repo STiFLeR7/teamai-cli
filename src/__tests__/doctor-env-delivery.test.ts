@@ -60,6 +60,17 @@ describe('doctor — env variables reach a shell', () => {
     return check;
   }
 
+  // A stray leftover block is cleanup hygiene, not a delivery failure — kept
+  // as its own Check (#693 review round 5) so a working delivery never
+  // reports as broken just because a dead file needs cleaning up.
+  async function staleBlockCheck(): Promise<Check> {
+    const ctx = await resolveDoctorContext();
+    if (!ctx) throw new Error('expected a resolved doctor context');
+    const check = (await buildChecks(ctx)).find((c) => c.name === 'No stale env blocks left behind');
+    if (!check) throw new Error('no stale-block check');
+    return check;
+  }
+
   beforeEach(async () => {
     tempDir = await fse.mkdtemp(path.join(os.tmpdir(), 'teamai-env-delivery-'));
     homeDir = path.join(tempDir, 'home');
@@ -128,9 +139,14 @@ describe('doctor — env variables reach a shell', () => {
     // Force the resolved profile to .profile, bypassing platform-dependent
     // detectShellProfile() so this test is deterministic on any host.
     teamConfig.sharing.env.shellProfilePath = path.join(homeDir, '.profile');
+    // The generator always writes the forward-slash, quoted form; envShPath
+    // is a native OS path (backslashes on a Windows dev host), so convert it
+    // the same way generateShellBlock does — this block must actually load,
+    // since the point of this test is that delivery stays healthy.
+    const envShPosix = envShPath.split(path.sep).join('/');
     await fse.writeFile(
       path.join(homeDir, '.profile'),
-      `# [teamai:env:start]\n# DO NOT EDIT\n[ -f ${envShPath} ] && source ${envShPath}\n# [teamai:env:end]\n`,
+      `# [teamai:env:start]\n# DO NOT EDIT\n[ -f '${envShPosix}' ] && source '${envShPosix}'\n# [teamai:env:end]\n`,
     );
     // A legacy block for the SAME env.sh, left behind in .bashrc — raw and
     // unquoted (the current generator always quotes via shellQuoteValue, so
@@ -144,10 +160,14 @@ describe('doctor — env variables reach a shell', () => {
       `# my bashrc\n# [teamai:env:start]\n# DO NOT EDIT\n[ -f ${envShPath} ] && source ${envShPath}\n# [teamai:env:end]\n`,
     );
 
-    const check = await envCheck();
-    expect(await check.check()).toBe(false);
-    expect(check.fix).toContain('.bashrc');
-    expect(check.fix).toContain('teamai uninstall');
+    // Delivery itself is healthy — a stray leftover must not report as a
+    // delivery failure (#693 review round 5).
+    expect(await (await envCheck()).check()).toBe(true);
+
+    const stale = await staleBlockCheck();
+    expect(await stale.check()).toBe(false);
+    expect(stale.fix).toContain('.bashrc');
+    expect(stale.fix).toContain('teamai uninstall');
   });
 
   // Regression (#693 review round 4): an unexpanded `~/...` override made
@@ -167,6 +187,7 @@ describe('doctor — env variables reach a shell', () => {
     );
 
     expect(await (await envCheck()).check()).toBe(true);
+    expect(await (await staleBlockCheck()).check()).toBe(true);
   });
 
   it('fails and names `variables:` for the shorthand env.yaml form (#662)', async () => {

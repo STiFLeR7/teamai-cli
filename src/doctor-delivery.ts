@@ -507,24 +507,45 @@ export async function buildMcpDeliveryChecks(ctx: DoctorContext): Promise<Check[
  * skipped for `unresolved variable(s)`, with nothing pointing back here.
  */
 export async function buildEnvDeliveryCheck(ctx: DoctorContext): Promise<Check[]> {
-  const problems = await envDeliveryProblems(ctx);
-  return [{
-    name: 'Env variables injected in shell profile',
-    source: 'local',
-    check: async () => problems.length === 0,
-    fix: problems.length === 0
-      ? 'Run `teamai pull` to inject env variables into shell profile'
-      : `${problems.join('; ')}. Run \`teamai pull\` after fixing the cause, then open a new shell.`,
-  }];
+  const { problems, staleProfiles } = await envDeliveryProblems(ctx);
+  return [
+    {
+      name: 'Env variables injected in shell profile',
+      source: 'local',
+      check: async () => problems.length === 0,
+      fix: problems.length === 0
+        ? 'Run `teamai pull` to inject env variables into shell profile'
+        : `${problems.join('; ')}. Run \`teamai pull\` after fixing the cause, then open a new shell.`,
+    },
+    // A separate check, not folded into the one above: a stray leftover
+    // block for this same scope (e.g. from before #682 changed which file
+    // `pull` prefers) is dead weight, not a delivery failure — the variables
+    // are reaching a shell just fine through the resolved profile. Reporting
+    // it as the SAME failure as "your env vars aren't reaching a shell"
+    // would tell a user whose delivery genuinely works that it is broken
+    // (#693 review round 5).
+    {
+      name: 'No stale env blocks left behind',
+      source: 'local',
+      check: async () => staleProfiles.length === 0,
+      fix: staleProfiles.length === 0
+        ? undefined
+        : `${nameList(staleProfiles)} still carries a teamai env block for this scope from an `
+          + 'earlier install; run `teamai uninstall` to remove it, or delete the block manually.',
+    },
+  ];
 }
 
-/** Every reason the team's env variables are not reaching a shell. */
-async function envDeliveryProblems(ctx: DoctorContext): Promise<string[]> {
+/** Every reason the team's env variables are not reaching a shell, and any stray leftover blocks found along the way. */
+async function envDeliveryProblems(
+  ctx: DoctorContext,
+): Promise<{ problems: string[]; staleProfiles: string[] }> {
   const { localConfig, teamConfig } = ctx;
-  if (teamConfig?.sharing?.env?.injectShellProfile === false) return [];
+  const none = { problems: [], staleProfiles: [] };
+  if (teamConfig?.sharing?.env?.injectShellProfile === false) return none;
 
   const envYamlPath = path.join(localConfig.repo.localPath, 'env', 'env.yaml');
-  if (!await pathExists(envYamlPath)) return [];
+  if (!await pathExists(envYamlPath)) return none;
 
   const { EnvHandler } = await import('./resources/env.js');
   const envHandler = new EnvHandler();
@@ -533,13 +554,13 @@ async function envDeliveryProblems(ctx: DoctorContext): Promise<string[]> {
   // shorthand `KEY: value` mapping is reported (#662) while a deliberate
   // `variables: []` is not. Counting the variables alone cannot tell them apart.
   const read = await envHandler.readEnvYaml(envYamlPath);
-  if (!read.ok) return [read.reason];
+  if (!read.ok) return { problems: [read.reason], staleProfiles: [] };
 
   const declared = read.variables;
   const problems: string[] = [];
 
   // Nothing declared and nothing malformed: there is nothing to deliver.
-  if (declared.length === 0) return problems;
+  if (declared.length === 0) return none;
 
   // env.sh lives under teamaiHome, which is <projectRoot>/.teamai in project
   // scope and ~/.teamai in user scope — mirror the path that `teamai pull`
@@ -598,24 +619,18 @@ async function envDeliveryProblems(ctx: DoctorContext): Promise<string[]> {
   // alone would stay green forever while a dead block for this same scope
   // sits in, say, `.bashrc` from a pre-#682/#661 install (#693 review).
   const home = getUserHome();
-  const strayProfiles: string[] = [];
+  const staleProfiles: string[] = [];
   for (const name of SHELL_PROFILE_CANDIDATE_NAMES) {
     const candidate = path.join(home, name);
     if (candidate === profilePath) continue;
     const content = await readFileSafe(candidate);
     const strayBlock = content ? extractEnvBlock(content) : null;
     if (strayBlock && envBlockReferencesDataHome(strayBlock, envShPath)) {
-      strayProfiles.push(candidate);
+      staleProfiles.push(candidate);
     }
   }
-  if (strayProfiles.length > 0) {
-    problems.push(
-      `${nameList(strayProfiles)} still carries a teamai env block for this scope from an `
-      + 'earlier install; run `teamai uninstall` to remove it, or delete the block manually',
-    );
-  }
 
-  return problems;
+  return { problems, staleProfiles };
 }
 
 /**
