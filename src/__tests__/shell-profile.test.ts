@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import path from 'node:path';
 import os from 'node:os';
 import fse from 'fs-extra';
-import { detectShellProfile } from '../utils/shell-profile.js';
+import { detectShellProfile, envBlockSourcesPath, shellQuoteValue } from '../utils/shell-profile.js';
 
 /**
  * `platform` is passed explicitly to every call below rather than relying on
@@ -79,5 +79,35 @@ describe('detectShellProfile', () => {
       await fse.writeFile(path.join(homeDir, '.profile'), '');
       expect(await detectShellProfile('win32')).toBe(path.join(homeDir, '.profile'));
     });
+  });
+});
+
+describe('envBlockSourcesPath', () => {
+  it('matches a plain path in the generator\'s single-quoted form', () => {
+    const envShPath = '/home/user/.teamai/env.sh';
+    const block = `[ -f ${shellQuoteValue(envShPath)} ] && source ${shellQuoteValue(envShPath)}`;
+    expect(envBlockSourcesPath(block, envShPath)).toBe(true);
+  });
+
+  // Regression (#693 review): shellQuoteValue escapes an embedded apostrophe
+  // as `'\''`, so a raw substring check for `/home/O'Brien/...` never matches
+  // — the block only ever contains the escaped form.
+  it('matches a home path containing an apostrophe (generator escapes it as \'\\\'\')', () => {
+    const envShPath = "/home/O'Brien/.teamai/env.sh";
+    const block = `[ -f ${shellQuoteValue(envShPath)} ] && source ${shellQuoteValue(envShPath)}`;
+    expect(block).toContain(String.raw`O'\''Brien`);
+    expect(envBlockSourcesPath(block, envShPath)).toBe(true);
+  });
+
+  it('does not match a different path', () => {
+    const block = `[ -f ${shellQuoteValue('/home/user/.teamai/env.sh')} ] && source ${shellQuoteValue('/home/user/.teamai/env.sh')}`;
+    expect(envBlockSourcesPath(block, '/home/other/.teamai/env.sh')).toBe(false);
+  });
+
+  it('does not match an unquoted, unconverted Windows path (#661)', () => {
+    const envShPath = 'C:/Users/me/.teamai/env.sh';
+    const windowsForm = envShPath.replace(/\//g, '\\');
+    const block = `[ -f ${windowsForm} ] && source ${windowsForm}`;
+    expect(envBlockSourcesPath(block, envShPath)).toBe(false);
   });
 });

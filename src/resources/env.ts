@@ -6,7 +6,7 @@ import type { ResourceItem, TeamaiConfig, LocalConfig } from '../types.js';
 import { TEAMAI_ENV_START, TEAMAI_ENV_END, getDataHome, getEnvBackupPath, isSelfMode } from '../types.js';
 import { pathExists, readFileSafe, writeFile, ensureDir, fileContentEqual } from '../utils/fs.js';
 import { log } from '../utils/logger.js';
-import { detectShellProfile as resolveShellProfilePath } from '../utils/shell-profile.js';
+import { detectShellProfile as resolveShellProfilePath, shellQuoteValue } from '../utils/shell-profile.js';
 
 // ─── Schema for env.yaml ────────────────────────────────
 
@@ -75,16 +75,6 @@ export function describeEnvYamlShapeProblem(raw: unknown): string | null {
 export function maskEnvValue(value: string): string {
   if (value.length < 4) return '****';
   return `${value.slice(0, 2)}****`;
-}
-
-/**
- * Quote a string so it is safe to interpolate into a POSIX shell (bash/zsh/sh).
- * Wraps the value in single quotes and encodes any embedded single quote as
- * `'\''`, leaving all other characters (including `"`, `$`, `` ` ``, `\`)
- * literal. Used when generating env.sh, which every team member sources.
- */
-function shellQuoteValue(value: string): string {
-  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 /**

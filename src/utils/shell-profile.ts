@@ -57,6 +57,17 @@ export async function detectShellProfile(
   return path.join(home, '.bashrc');
 }
 
+/**
+ * Quote a string so it is safe to interpolate into a POSIX shell (bash/zsh/sh).
+ * Wraps the value in single quotes and encodes any embedded single quote as
+ * `'\''`, leaving all other characters (including `"`, `$`, `` ` ``, `\`)
+ * literal. Used both when generating env.sh (env.ts) and when checking
+ * whether a block on disk matches that same generated form.
+ */
+export function shellQuoteValue(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 /** The TeamAI-managed block of a shell profile, or null when it is absent. */
 export function extractEnvBlock(profileContent: string): string | null {
   const start = profileContent.indexOf(TEAMAI_ENV_START);
@@ -83,6 +94,16 @@ export function extractEnvBlock(profileContent: string): string | null {
  */
 export function envBlockSourcesPath(block: string, envShPath: string): boolean {
   const posixPath = envShPath.split(path.sep).join('/');
+
+  // The generator (generateShellBlock) always wraps the path in single
+  // quotes via shellQuoteValue, which escapes an embedded apostrophe as
+  // `'\''` — a path like `/home/O'Brien/.teamai/env.sh` never appears as a
+  // contiguous raw substring in the block, only in this escaped form.
+  if (block.includes(shellQuoteValue(posixPath))) return true;
+
+  // Fall back to a raw/loosely-quoted match for anything not in the
+  // generator's own format — e.g. #661's legacy unconverted backslash path,
+  // which must still fail this check.
   if (!block.includes(posixPath)) return false;
   if (!/\s/.test(posixPath)) return true;
   return block.includes(`"${posixPath}"`) || block.includes(`'${posixPath}'`);
