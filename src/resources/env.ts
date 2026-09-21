@@ -7,7 +7,7 @@ import { TEAMAI_ENV_START, TEAMAI_ENV_END, getDataHome, getEnvBackupPath, isSelf
 import { pathExists, readFileSafe, writeFile, ensureDir, fileContentEqual } from '../utils/fs.js';
 import { log } from '../utils/logger.js';
 import {
-  detectShellProfile as resolveShellProfilePath,
+  resolveActiveShellProfile,
   shellQuoteValue,
   isWindowsFormPath,
 } from '../utils/shell-profile.js';
@@ -262,7 +262,7 @@ export class EnvHandler extends ResourceHandler {
     if (inject) {
       const profilePath = teamConfig.sharing.env.shellProfilePath
         ? teamConfig.sharing.env.shellProfilePath
-        : await this.detectShellProfile();
+        : await this.detectShellProfile(path.join(teamaiHome, 'env.sh'));
 
       const shellBlock = this.generateShellBlock(teamaiHome);
       await this.injectShellProfile(profilePath, shellBlock);
@@ -414,10 +414,12 @@ export class EnvHandler extends ResourceHandler {
    * a second spelling of this choice would check `.bashrc` while the pull
    * wrote `.zshrc`, and report a correct install as broken. Delegates to the
    * shared `utils/shell-profile.js` so `teamai uninstall` resolves the same
-   * file too (#682).
+   * file too (#682), and stays on whichever candidate already carries this
+   * scope's block rather than re-deriving it from scratch every pull (#693
+   * review round 7).
    */
-  detectShellProfile(platform: NodeJS.Platform = process.platform): Promise<string> {
-    return resolveShellProfilePath(platform);
+  detectShellProfile(envShPath: string, platform: NodeJS.Platform = process.platform): Promise<string> {
+    return resolveActiveShellProfile(envShPath, platform);
   }
 
   /**

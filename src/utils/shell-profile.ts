@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { pathExists } from './fs.js';
+import { pathExists, readFileSafe } from './fs.js';
 import { getUserHome } from './home.js';
 import { TEAMAI_ENV_START, TEAMAI_ENV_END } from '../types.js';
 
@@ -200,4 +200,36 @@ export function envBlockReferencesDataHome(block: string, envShPath: string): bo
     }
   }
   return false;
+}
+
+/**
+ * Resolve which shell profile file this scope's env block belongs in.
+ *
+ * Sticky by design: a candidate that already carries a block for this
+ * scope's `env.sh` is reused, rather than re-running `detectShellProfile`'s
+ * order-based fallback on every pull. Without this, Git for Windows' own
+ * `/etc/profile.d/bash_profile.sh` changes which candidate *exists* between
+ * two pulls out from under it: the first time a login shell starts with
+ * `~/.bashrc` present but none of `~/.bash_profile`, `~/.bash_login` or
+ * `~/.profile`, it auto-generates a `~/.bash_profile` that sources both —
+ * not a symlink, a plain file containing `test -f ~/.bashrc && . ~/.bashrc`.
+ * `detectShellProfile`'s order then prefers that newly-existing file on the
+ * *next* pull, injecting a second block there and reporting the still-loading
+ * `.bashrc` one (loaded transitively through the generated forwarder) as a
+ * stray leftover, even though nothing ever stopped working (#693 review
+ * round 7). Only when no candidate already owns a block — a genuinely first
+ * pull — does the order-based fallback decide.
+ */
+export async function resolveActiveShellProfile(
+  envShPath: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<string> {
+  const home = getUserHome();
+  for (const name of SHELL_PROFILE_CANDIDATE_NAMES) {
+    const candidate = path.join(home, name);
+    const content = await readFileSafe(candidate);
+    const block = content ? extractEnvBlock(content) : null;
+    if (block && envBlockReferencesDataHome(block, envShPath)) return candidate;
+  }
+  return detectShellProfile(platform);
 }

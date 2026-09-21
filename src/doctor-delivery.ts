@@ -601,7 +601,7 @@ async function envDeliveryProblems(
   // would never match its own resolved file and get reported as a stray
   // copy of itself (#693 review round 4).
   const profilePath = expandHome(
-    teamConfig?.sharing?.env?.shellProfilePath ?? await envHandler.detectShellProfile(),
+    teamConfig?.sharing?.env?.shellProfilePath ?? await envHandler.detectShellProfile(envShPath),
   );
   const profile = await readFileSafe(profilePath);
   const block = profile === null ? null : extractEnvBlock(profile);
