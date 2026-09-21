@@ -132,12 +132,30 @@ describe('resolveActiveShellProfile', () => {
     expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
   });
 
-  it('sticks to a lower-priority candidate over a higher-priority one that exists but carries no block', async () => {
-    // Order-based detection would prefer .bash_profile over .profile; the
-    // sticky block living in .profile must still win.
+  // Regression (#693 review round 8): the original version of this resolver
+  // scanned every candidate for a matching block regardless of whether the
+  // order-based pick could ever reach it, so a stale pre-#682 block sitting
+  // in `.bashrc` outranked a genuinely unwritten, currently-read `.profile`
+  // — silently reintroducing #682 for exactly the installs this PR fixes,
+  // with `doctor` unable to catch it since the stale block is well-formed
+  // where it sits. The order-based pick's own content must name a candidate
+  // before that candidate's block is ever preferred over it.
+  it('does not stick to a stale block in a candidate the order-based pick never reads (#682 upgrade case)', async () => {
+    // The exact #682 repro: .bashrc present, .bash_profile/.bash_login absent,
+    // .profile present — order-based detection reads .profile, never .bashrc,
+    // and .profile does not itself source .bashrc.
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    await fse.writeFile(path.join(homeDir, '.profile'), '# just a profile, unrelated to .bashrc\n');
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.profile'));
+  });
+
+  it('prefers the order-based pick over an unrelated candidate that merely carries a block', async () => {
+    // .bash_profile exists (order-based winner) but has content unrelated to
+    // any other candidate; a block sitting in .profile must not be preferred
+    // just because it exists somewhere in the candidate list.
     await fse.writeFile(path.join(homeDir, '.bash_profile'), 'unrelated content\n');
     await fse.writeFile(path.join(homeDir, '.profile'), teamaiBlock());
-    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.profile'));
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
   });
 
   it('falls back to order-based detection when no candidate owns a block yet (first pull)', async () => {
