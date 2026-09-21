@@ -108,3 +108,53 @@ export function envBlockSourcesPath(block: string, envShPath: string): boolean {
   if (!/\s/.test(posixPath)) return true;
   return block.includes(`"${posixPath}"`) || block.includes(`'${posixPath}'`);
 }
+
+/**
+ * Every on-disk spelling of `envShPath` a teamai block — current or legacy —
+ * might contain.
+ *
+ * A CLI predating a given fix wrote the source path differently: the raw
+ * OS-native form with unconverted backslashes (pre-#661), or the MSYS/Cygwin
+ * drive form (`/d/Users/...`, what Git Bash's own `$PWD` shows) from a
+ * locally-built or hand-patched install. Those blocks are broken — a POSIX
+ * shell cannot read either form — but they still name this scope's own
+ * `env.sh`, and a plain string match against only the current format leaves
+ * them permanently invisible to both `doctor` and `uninstall` (#693 review).
+ */
+function candidateSpellings(envShPath: string): string[] {
+  const spellings = new Set<string>([envShPath, envShPath.split(path.sep).join('/')]);
+
+  const drive = /^([A-Za-z]):[\\/](.*)$/.exec(envShPath);
+  if (drive) {
+    spellings.add(`/${drive[1].toLowerCase()}/${drive[2].replace(/\\/g, '/')}`);
+  }
+
+  return [...spellings];
+}
+
+/**
+ * Whether a block's `source` line names `envShPath` under any spelling
+ * teamai has ever written it in — current or legacy, quoted or not,
+ * forward- or back-slashed, drive- or MSYS-form — regardless of whether that
+ * spelling actually loads in a shell.
+ *
+ * This answers a different question than `envBlockSourcesPath`: "does this
+ * block belong to this scope" (ownership, for `uninstall` cleanup and for
+ * `doctor` flagging a stray leftover) rather than "does this block actually
+ * work" (correctness, for `doctor`'s #661 does-it-load check). A genuinely
+ * broken legacy block still belongs to this scope and still needs to be
+ * found and removed — conflating the two would make `doctor` stop reporting
+ * a real #661-style break just because the path happens to match.
+ */
+export function envBlockReferencesDataHome(block: string, envShPath: string): boolean {
+  for (const spelling of candidateSpellings(envShPath)) {
+    if (
+      block.includes(spelling)
+      || block.includes(shellQuoteValue(spelling))
+      || block.includes(`"${spelling}"`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}

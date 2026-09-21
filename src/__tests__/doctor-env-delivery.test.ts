@@ -119,6 +119,33 @@ describe('doctor — env variables reach a shell', () => {
     expect(check.fix).toContain(envShPath);
   });
 
+  // Regression (#693 hardware review by @CarlosWonMore): which file `pull`
+  // prefers has changed (#682), and `pull` only ever adds a block, never
+  // migrates an old one away. A stray, still-scope-owned block left behind
+  // in a different candidate file must not go unreported forever.
+  it('flags a stray legacy block left in a different candidate file for this scope (#693)', async () => {
+    await writeEnvSh("export JIRA_PASSWORD='s3cret'\n");
+    // Force the resolved profile to .profile, bypassing platform-dependent
+    // detectShellProfile() so this test is deterministic on any host.
+    teamConfig.sharing.env.shellProfilePath = path.join(homeDir, '.profile');
+    await fse.writeFile(
+      path.join(homeDir, '.profile'),
+      `# [teamai:env:start]\n# DO NOT EDIT\n[ -f ${envShPath} ] && source ${envShPath}\n# [teamai:env:end]\n`,
+    );
+    // A pre-#661 legacy block for the SAME env.sh, left behind in .bashrc —
+    // raw, unquoted, unconverted backslashes.
+    const windowsEnvSh = envShPath.replace(/\//g, '\\');
+    await fse.writeFile(
+      path.join(homeDir, '.bashrc'),
+      `# my bashrc\n# [teamai:env:start]\n# DO NOT EDIT\n[ -f ${windowsEnvSh} ] && source ${windowsEnvSh}\n# [teamai:env:end]\n`,
+    );
+
+    const check = await envCheck();
+    expect(await check.check()).toBe(false);
+    expect(check.fix).toContain('.bashrc');
+    expect(check.fix).toContain('teamai uninstall');
+  });
+
   it('fails and names `variables:` for the shorthand env.yaml form (#662)', async () => {
     await writeEnvYaml('JIRA_PASSWORD: "s3cret"\n');
     await writeEnvSh('');

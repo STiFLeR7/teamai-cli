@@ -56,7 +56,7 @@ import { getUserHome } from './utils/home.js';
 import {
   detectShellProfile,
   extractEnvBlock,
-  envBlockSourcesPath,
+  envBlockReferencesDataHome,
   SHELL_PROFILE_CANDIDATE_NAMES,
 } from './utils/shell-profile.js';
 
@@ -521,10 +521,14 @@ async function buildRemovalPlan(
     // the current resolution no longer points at, and a plain uninstall would
     // silently leave that managed block behind.
     //
-    // A candidate only counts if its block actually sources THIS scope's
-    // env.sh (envBlockSourcesPath) — matching on the marker alone would let
-    // this uninstall delete a different scope's still-active block just
-    // because it also happens to live in one of the candidate filenames.
+    // A candidate only counts if its block actually names THIS scope's
+    // env.sh (envBlockReferencesDataHome) — matching on the marker alone
+    // would let this uninstall delete a different scope's still-active block
+    // just because it also happens to live in one of the candidate
+    // filenames. This check is deliberately looser than doctor's "does it
+    // load" check: a legacy block written by a pre-#661/#682 CLI (raw
+    // backslashes, or the MSYS drive form) still belongs to this scope and
+    // still has to be found and removed, even though it never worked.
     const configuredProfilePath = teamConfig.sharing.env.shellProfilePath
       ? expandHome(teamConfig.sharing.env.shellProfilePath)
       : await detectShellProfile();
@@ -537,7 +541,7 @@ async function buildRemovalPlan(
     for (const candidate of candidateProfilePaths) {
       const profileContent = await readFileSafe(candidate);
       const block = profileContent ? extractEnvBlock(profileContent) : null;
-      if (block && envBlockSourcesPath(block, envShPath)) {
+      if (block && envBlockReferencesDataHome(block, envShPath)) {
         plan.shellProfiles.push(candidate);
       }
     }

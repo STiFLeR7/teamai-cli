@@ -7,7 +7,13 @@ import type { DeliveryTarget, ResourceItem } from './types.js';
 import { splitFrontmatter } from './utils/frontmatter.js';
 import type { ResourceHandler } from './resources/base.js';
 import type { Check, DoctorContext } from './doctor.js';
-import { extractEnvBlock, envBlockSourcesPath } from './utils/shell-profile.js';
+import {
+  extractEnvBlock,
+  envBlockSourcesPath,
+  envBlockReferencesDataHome,
+  SHELL_PROFILE_CANDIDATE_NAMES,
+} from './utils/shell-profile.js';
+import { getUserHome } from './utils/home.js';
 
 /**
  * The checks that verify the payload rather than the plumbing: what each tool
@@ -576,6 +582,29 @@ async function envDeliveryProblems(ctx: DoctorContext): Promise<string[]> {
     problems.push(
       `the block in ${profilePath} does not load ${envShPath}: a POSIX shell reads an unquoted `
       + 'backslash as an escape, so the `[ -f ... ]` test fails and `source` never runs',
+    );
+  }
+
+  // A stray block can also sit in a different candidate file: which file
+  // `pull` prefers has changed at least once (#682), and `pull` only ever
+  // adds a block, never migrates an old one away. Checking `profilePath`
+  // alone would stay green forever while a dead block for this same scope
+  // sits in, say, `.bashrc` from a pre-#682/#661 install (#693 review).
+  const home = getUserHome();
+  const strayProfiles: string[] = [];
+  for (const name of SHELL_PROFILE_CANDIDATE_NAMES) {
+    const candidate = path.join(home, name);
+    if (candidate === profilePath) continue;
+    const content = await readFileSafe(candidate);
+    const strayBlock = content ? extractEnvBlock(content) : null;
+    if (strayBlock && envBlockReferencesDataHome(strayBlock, envShPath)) {
+      strayProfiles.push(candidate);
+    }
+  }
+  if (strayProfiles.length > 0) {
+    problems.push(
+      `${nameList(strayProfiles)} still carries a teamai env block for this scope from an `
+      + 'earlier install; run `teamai uninstall` to remove it, or delete the block manually',
     );
   }
 

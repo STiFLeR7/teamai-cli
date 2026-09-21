@@ -353,6 +353,46 @@ describe('uninstall', () => {
     expect(bashrcAfter).toBe(bashrc);
   });
 
+  // Regression (#693 hardware review by @CarlosWonMore): a pre-#661 CLI wrote
+  // the source path raw and unquoted, with unconverted backslashes. That
+  // block is broken (a POSIX shell never loads it) but still names this
+  // scope's own env.sh, and uninstall must still find and remove it — not
+  // just blocks written in the current quoted/forward-slash format.
+  it('cleans a pre-#661 legacy block (raw, unquoted, unconverted backslashes)', async () => {
+    const { homeDir, repoPath, teamaiHome } = await setupFixture(tmpDir);
+    vi.stubEnv('HOME', homeDir);
+    vi.stubEnv('SHELL', '');
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+
+    const envShWindows = path.join(homeDir, '.teamai', 'env.sh');
+    const legacyBashrc = [
+      '# my bashrc',
+      TEAMAI_ENV_START,
+      '# DO NOT EDIT',
+      `[ -f ${envShWindows} ] && source ${envShWindows}`,
+      TEAMAI_ENV_END,
+    ].join('\n');
+    await fse.writeFile(path.join(homeDir, '.bashrc'), legacyBashrc);
+    await fse.writeFile(path.join(homeDir, '.profile'), '# my profile');
+
+    const teamConfig = makeTeamConfig({
+      sharing: {
+        skills: {},
+        rules: { enforced: [] },
+        docs: { localDir: `${teamaiHome}/docs` },
+        env: { injectShellProfile: true },
+      },
+    });
+    const localConfig = makeLocalConfig(homeDir, repoPath);
+    mockAutoDetectInit.mockResolvedValue({ localConfig, teamConfig });
+
+    await uninstall({ force: true });
+
+    const bashrcAfter = await fse.readFile(path.join(homeDir, '.bashrc'), 'utf-8');
+    expect(bashrcAfter).toContain('# my bashrc');
+    expect(bashrcAfter).not.toContain(TEAMAI_ENV_START);
+  });
+
   // Regression: Cursor rules are `.mdc`; matching only `.md` left every team
   // rule on disk after uninstall, still injected into each Cursor session.
   it('removes cursor .mdc rules (and a legacy .md copy) on uninstall', async () => {

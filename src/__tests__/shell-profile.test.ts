@@ -2,7 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import path from 'node:path';
 import os from 'node:os';
 import fse from 'fs-extra';
-import { detectShellProfile, envBlockSourcesPath, shellQuoteValue } from '../utils/shell-profile.js';
+import {
+  detectShellProfile,
+  envBlockSourcesPath,
+  envBlockReferencesDataHome,
+  shellQuoteValue,
+} from '../utils/shell-profile.js';
 
 /**
  * `platform` is passed explicitly to every call below rather than relying on
@@ -109,5 +114,39 @@ describe('envBlockSourcesPath', () => {
     const windowsForm = envShPath.replace(/\//g, '\\');
     const block = `[ -f ${windowsForm} ] && source ${windowsForm}`;
     expect(envBlockSourcesPath(block, envShPath)).toBe(false);
+  });
+});
+
+// Regression (#693 hardware review by @CarlosWonMore): envBlockSourcesPath
+// only recognizes the current writing format. A block from a pre-#661 or
+// pre-#682 CLI names the same env.sh under a different, broken spelling —
+// still owned by this scope, and uninstall/doctor's "is there a stray
+// leftover" check must still find it to clean it up or flag it.
+describe('envBlockReferencesDataHome', () => {
+  it('matches the current (quoted, forward-slash) form', () => {
+    const envShPath = 'D:\\Users\\me\\.teamai\\env.sh';
+    const posix = envShPath.split('\\').join('/');
+    const block = `[ -f ${shellQuoteValue(posix)} ] && source ${shellQuoteValue(posix)}`;
+    expect(envBlockReferencesDataHome(block, envShPath)).toBe(true);
+  });
+
+  it('matches a pre-#661 raw, unquoted, unconverted Windows path', () => {
+    const envShPath = 'D:\\Users\\me\\.teamai\\env.sh';
+    const block = `[ -f ${envShPath} ] && source ${envShPath}`;
+    expect(envBlockReferencesDataHome(block, envShPath)).toBe(true);
+  });
+
+  it('matches the MSYS/Cygwin drive form (/d/Users/...) a locally-patched build wrote', () => {
+    const envShPath = 'D:\\Users\\me\\.teamai\\env.sh';
+    const msysForm = '/d/Users/me/.teamai/env.sh';
+    const block = `[ -f ${msysForm} ] && source ${msysForm}`;
+    expect(envBlockReferencesDataHome(block, envShPath)).toBe(true);
+  });
+
+  it('does not match a different scope\'s env.sh', () => {
+    const envShPath = 'D:\\Users\\me\\.teamai\\env.sh';
+    const otherPosix = 'D:/some-other-project/.teamai/env.sh';
+    const block = `[ -f ${shellQuoteValue(otherPosix)} ] && source ${shellQuoteValue(otherPosix)}`;
+    expect(envBlockReferencesDataHome(block, envShPath)).toBe(false);
   });
 });
