@@ -205,31 +205,56 @@ export function envBlockReferencesDataHome(block: string, envShPath: string): bo
 /**
  * Resolve which shell profile file this scope's env block belongs in.
  *
- * Sticky by design: a candidate that already carries a block for this
- * scope's `env.sh` is reused, rather than re-running `detectShellProfile`'s
- * order-based fallback on every pull. Without this, Git for Windows' own
- * `/etc/profile.d/bash_profile.sh` changes which candidate *exists* between
- * two pulls out from under it: the first time a login shell starts with
- * `~/.bashrc` present but none of `~/.bash_profile`, `~/.bash_login` or
- * `~/.profile`, it auto-generates a `~/.bash_profile` that sources both —
- * not a symlink, a plain file containing `test -f ~/.bashrc && . ~/.bashrc`.
- * `detectShellProfile`'s order then prefers that newly-existing file on the
- * *next* pull, injecting a second block there and reporting the still-loading
- * `.bashrc` one (loaded transitively through the generated forwarder) as a
- * stray leftover, even though nothing ever stopped working (#693 review
- * round 7). Only when no candidate already owns a block — a genuinely first
- * pull — does the order-based fallback decide.
+ * Starts from `detectShellProfile`'s order-based pick — the file the current
+ * environment actually reads — and only diverges from it in two cases, both
+ * narrower than "any candidate with a block wins" (#693 review round 8: that
+ * broader rule let a stale pre-#682 block in `.bashrc` outrank a genuinely
+ * unwritten, currently-read `.profile`, silently reintroducing #682 for
+ * exactly the installs upgrading through this fix, with `doctor` no longer
+ * able to catch it since the stale block is well-formed where it sits):
+ *
+ * 1. The order-based pick already carries this scope's block — the common
+ *    steady state, unchanged from before.
+ * 2. The order-based pick carries no block of its own, but its own content
+ *    names another candidate that does — e.g. Git for Windows'
+ *    `/etc/profile.d/bash_profile.sh` auto-generates `~/.bash_profile`
+ *    (`test -f ~/.bashrc && . ~/.bashrc`, a plain file, not a symlink) the
+ *    first time a login shell starts with `~/.bashrc` present but none of
+ *    `~/.bash_profile`, `~/.bash_login` or `~/.profile`. `detectShellProfile`
+ *    then prefers that newly-existing file on the *next* pull; injecting a
+ *    second block there would leave the still-loading `.bashrc` one (loaded
+ *    transitively through the generated forwarder) reported as a stray
+ *    leftover, even though nothing ever stopped working.
+ *
+ * A candidate the order-based pick does not itself read is never preferred,
+ * regardless of what it contains.
  */
 export async function resolveActiveShellProfile(
   envShPath: string,
   platform: NodeJS.Platform = process.platform,
 ): Promise<string> {
   const home = getUserHome();
-  for (const name of SHELL_PROFILE_CANDIDATE_NAMES) {
-    const candidate = path.join(home, name);
-    const content = await readFileSafe(candidate);
-    const block = content ? extractEnvBlock(content) : null;
-    if (block && envBlockReferencesDataHome(block, envShPath)) return candidate;
+  const activePick = await detectShellProfile(platform);
+
+  const activeContent = await readFileSafe(activePick);
+  const activeBlock = activeContent ? extractEnvBlock(activeContent) : null;
+  if (activeBlock && envBlockReferencesDataHome(activeBlock, envShPath)) return activePick;
+
+  if (activeContent) {
+    for (const name of SHELL_PROFILE_CANDIDATE_NAMES) {
+      const candidate = path.join(home, name);
+      // A home-relative reference (`~/.bashrc`, `$HOME/.bashrc`), the shape a
+      // sourcing line actually takes — not a bare substring match, which a
+      // plain English comment mentioning the filename would also satisfy.
+      const referencesCandidate = activeContent.includes(`~/${name}`)
+        || activeContent.includes(`$HOME/${name}`)
+        || activeContent.includes('${HOME}/' + name);
+      if (candidate === activePick || !referencesCandidate) continue;
+      const content = await readFileSafe(candidate);
+      const block = content ? extractEnvBlock(content) : null;
+      if (block && envBlockReferencesDataHome(block, envShPath)) return candidate;
+    }
   }
-  return detectShellProfile(platform);
+
+  return activePick;
 }
