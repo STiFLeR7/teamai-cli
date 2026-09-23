@@ -211,6 +211,43 @@ describe('resolveActiveShellProfile', () => {
     await fse.writeFile(path.join(homeDir, '.profile'), 'source ~/.bash_profile\n');
     expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
   });
+
+  // Regression (#693 review round 10): the resolver committed to the first
+  // referenced candidate in SHELL_PROFILE_CANDIDATE_NAMES's fixed order and
+  // gave up if that branch was a dead end, instead of trying every candidate
+  // the active pick actually references. .bash_profile sourcing both
+  // .bashrc and .profile is exactly Git for Windows' own generated content
+  // — .bashrc sorts earlier in the candidate list, so a dead .bashrc branch
+  // would previously stop the search before it ever reached .profile.
+  it('tries every referenced candidate, not just the first in priority order', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'test -f ~/.bashrc && . ~/.bashrc\ntest -f ~/.profile && . ~/.profile\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), '# no block here\n');
+    await fse.writeFile(path.join(homeDir, '.profile'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.profile'));
+  });
+
+  // Regression (#693 review round 10): splitting on `||` treated its
+  // right-hand side as unconditionally reached, but it only runs if the left
+  // side fails — undetermined here. A stale block behind `||` must not win
+  // over a working one the left side already reaches.
+  it('does not treat the right side of || as reachable', async () => {
+    // Both .profile and .bashrc carry a valid block for this scope; the
+    // point is which one the resolver *reaches* through the || line, not
+    // which one has a well-formed block. .bashrc sorts earlier than
+    // .profile in SHELL_PROFILE_CANDIDATE_NAMES, so a naive "any referenced
+    // candidate in priority order" search would wrongly land on .bashrc even
+    // though it only runs if the left side (.profile) fails.
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'source ~/.profile || source ~/.bashrc\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.profile'), teamaiBlock());
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.profile'));
+  });
 });
 
 describe('envBlockSourcesPath', () => {

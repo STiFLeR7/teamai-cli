@@ -222,7 +222,14 @@ function referencesCandidate(content: string, name: string): boolean {
   const target = new RegExp(`^["']?(?:~|\\$\\{?HOME\\}?)/${escaped}(?![\\w.-])["']?$`);
   for (const rawLine of content.split('\n')) {
     if (rawLine.trimStart().startsWith('#')) continue;
-    for (const statement of rawLine.split(/&&|\|\||;/)) {
+    // Only `&&`/`;` split into statements that are still unconditionally
+    // attempted (or gated on the referenced candidate's own existence, which
+    // is independently re-checked by reading that candidate). `||`'s right
+    // side runs only if its left side fails — something not established
+    // here — so it is left folded into the same statement as its left side:
+    // that statement's first `.`/`source` command (the unconditional one)
+    // still matches, but a `source` sitting only after `||` never does.
+    for (const statement of rawLine.split(/&&|;/)) {
       const tokens = statement.trim().split(/\s+/);
       if (tokens.length >= 2 && (tokens[0] === '.' || tokens[0] === 'source') && target.test(tokens[1])) {
         return true;
@@ -236,17 +243,22 @@ function referencesCandidate(content: string, name: string): boolean {
  * Resolve which shell profile file this scope's env block belongs in.
  *
  * Starts from `detectShellProfile`'s order-based pick — the file the current
- * environment actually reads — and follows the chain of files it actually
- * `source`s (transitively, with cycle protection) looking for one that
- * already carries this scope's block. A candidate the chain never reaches is
- * never preferred, regardless of what it contains: an earlier version
- * matched any candidate with a block anywhere (#693 review round 8: a stale
- * pre-#682 block in `.bashrc` then outranked a genuinely unwritten,
- * currently-read `.profile`, reintroducing #682 for exactly the installs
- * upgrading through this fix) and checked only one hop of sourcing (#693
- * review round 9: `.bash_profile` sourcing `.profile` sourcing `.bashrc` —
- * the common Debian `.profile` pattern — would miss a block sitting in
- * `.bashrc` two hops away and inject a duplicate into `.bash_profile`).
+ * environment actually reads — and searches every file it actually `source`s
+ * (transitively, breadth-first, with cycle protection) for one that already
+ * carries this scope's block. A candidate the search never reaches is never
+ * preferred, regardless of what it contains: earlier versions matched any
+ * candidate with a block anywhere (#693 review round 8: a stale pre-#682
+ * block in `.bashrc` then outranked a genuinely unwritten, currently-read
+ * `.profile`, reintroducing #682 for exactly the installs upgrading through
+ * this fix), checked only one hop of sourcing (#693 review round 9:
+ * `.bash_profile` sourcing `.profile` sourcing `.bashrc` — the common Debian
+ * `.profile` pattern — would miss a block sitting in `.bashrc` two hops away
+ * and inject a duplicate into `.bash_profile`), and followed only the first
+ * referenced candidate in a fixed priority order rather than every one
+ * (#693 review round 10: `.bash_profile` sourcing both `.bashrc` and
+ * `.profile`, with the block actually sitting in `.profile`, would commit to
+ * the dead-end `.bashrc` branch first — earlier in `SHELL_PROFILE_CANDIDATE_
+ * NAMES` — and give up without ever trying `.profile`).
  *
  * The common real case this exists for: Git for Windows'
  * `/etc/profile.d/bash_profile.sh` auto-generates `~/.bash_profile`
@@ -266,20 +278,23 @@ export async function resolveActiveShellProfile(
   const activePick = await detectShellProfile(platform);
 
   const visited = new Set<string>();
-  let current = activePick;
-  while (!visited.has(current)) {
+  const queue: string[] = [activePick];
+  while (queue.length > 0) {
+    const current = queue.shift() as string;
+    if (visited.has(current)) continue;
     visited.add(current);
+
     const content = await readFileSafe(current);
     const block = content ? extractEnvBlock(content) : null;
     if (block && envBlockReferencesDataHome(block, envShPath)) return current;
-    if (!content) break;
+    if (!content) continue;
 
-    const next = SHELL_PROFILE_CANDIDATE_NAMES.find((name) => {
+    for (const name of SHELL_PROFILE_CANDIDATE_NAMES) {
       const candidate = path.join(home, name);
-      return candidate !== current && !visited.has(candidate) && referencesCandidate(content, name);
-    });
-    if (!next) break;
-    current = path.join(home, next);
+      if (candidate !== current && !visited.has(candidate) && referencesCandidate(content, name)) {
+        queue.push(candidate);
+      }
+    }
   }
 
   return activePick;
