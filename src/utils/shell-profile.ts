@@ -202,7 +202,6 @@ export function envBlockReferencesDataHome(block: string, envShPath: string): bo
   return false;
 }
 
-/** `~/name`, `$HOME/name` or `${HOME}/name`, optionally quoted, as a token this scanner accepts as a reference to `name`. */
 /**
  * `~/name` (never quoted — a shell does not tilde-expand inside any quotes)
  * or `$HOME/name` / `${HOME}/name` (unquoted or double-quoted — a shell
@@ -218,108 +217,76 @@ function homeRelativeRef(name: string): string {
   return `(?:~/${suffix}|\\$\\{?HOME\\}?/${suffix}|"\\$\\{?HOME\\}?/${suffix}")`;
 }
 
-/** If `token` is a home-relative reference by the same rule `homeRelativeRef` accepts, the real path it names. */
-function homeRelativePath(token: string, home: string): string | null {
-  let m = token.match(/^~\/(.+)$/);
-  if (!m) m = token.match(/^\$\{?HOME\}?\/(.+)$/);
-  if (!m) m = token.match(/^"\$\{?HOME\}?\/(.+)"$/);
-  return m ? path.join(home, m[1]) : null;
-}
-
-/** Whether `statement` opens, or closes, a construct whose body is not guaranteed to run — `if`, `for`/`while`/`until`, `case`, a function/brace group, or a `(...)` subshell (whose exports never reach the caller even when its body always runs — #693 review round 14). */
-function opensUnverifiedBlock(statement: string): boolean {
-  return /^(?:if|for|while|until|case)\b/.test(statement)
-    || /^function\s+\S/.test(statement)
-    || /^\S+\s*\(\)\s*\{?\s*$/.test(statement)
-    || statement === '{'
-    || statement === '(';
-}
-function closesUnverifiedBlock(statement: string): boolean {
-  return /^(?:fi|done|esac)\b/.test(statement) || statement === '}' || statement === ')';
-}
-
-/** Strips a trailing shell comment (`#` at the start of a word, outside this scanner's quote-naive view) from `line`. */
-function stripComment(line: string): string {
-  const at = line.search(/(?:^|\s)#/);
-  if (at === -1) return line;
-  return line.slice(0, line.indexOf('#', at)).trimEnd();
-}
-
 /**
- * Splits `s` on every top-level occurrence of `sep`, skipping any that fall
- * inside single or double quotes — the naive `.split(sep)` this replaces
- * would otherwise cut a quoted argument in half, e.g. treating the `;` in
- * `printf '%s' 'x; source ~/.bashrc; y'` as a real statement separator and
- * inventing an executed `source` that was actually just string data (#693
- * review round 14). No escape handling beyond that (matching this scanner's
- * existing quote-naive view elsewhere) — good enough to stop a quoted
- * separator from being mistaken for a real one, not a full shell lexer.
+ * Whether `line` opens, or closes, a construct whose body either isn't
+ * guaranteed to run (`if`/`for`/`while`/`until`/`case`/`select`, a function)
+ * or runs in a subshell whose exports never reach the caller even when it
+ * always runs (`(...)`, a brace group) — content inside never counts as
+ * reaching a candidate, no matter how it looks (#693 review rounds 11-15).
  */
-function splitTopLevel(s: string, sep: string): string[] {
-  const parts: string[] = [];
-  let current = '';
-  let quote: string | null = null;
-  for (let i = 0; i < s.length; ) {
-    const ch = s[i];
-    if (quote) {
-      current += ch;
-      if (ch === quote) quote = null;
-      i += 1;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      current += ch;
-      i += 1;
-      continue;
-    }
-    if (s.startsWith(sep, i)) {
-      parts.push(current);
-      current = '';
-      i += sep.length;
-      continue;
-    }
-    current += ch;
-    i += 1;
-  }
-  parts.push(current);
-  return parts;
+function opensUnverifiedBlock(line: string): boolean {
+  return /^(?:if|for|while|until|case|select)\b/.test(line)
+    || /^function\s+\S/.test(line)
+    || /^\S+\s*\(\)\s*\{?\s*$/.test(line)
+    || line === '{'
+    || line === '(';
+}
+function closesUnverifiedBlock(line: string): boolean {
+  return /^(?:fi|done|esac)\b/.test(line) || /^\}(?:\s|$)/.test(line) || /^\)(?:\s|$)/.test(line);
 }
 
 /**
- * Splits `content` into logical lines: strips comments, joins `\`-continued
- * lines, joins a lone `{` onto the function/construct header it opens (`fn()`
- * then `{` on its own line), and drops heredoc bodies entirely (their text is
- * data, never executed statements — #693 review round 13), tracking every
- * terminator in order when a single command opens more than one heredoc
- * (`cat <<A <<B`, read in the order they were opened — #693 review round 14).
+ * Splits `content` into logical lines: joins a line ending in `\`, or in a
+ * dangling `&&`/`||` awaiting its next operand (both are real, unremarkable
+ * shell continuation — a trailing binary operator implicitly continues onto
+ * the next line with no backslash needed, and treating that next line as an
+ * independent, unconditional statement is a real false-"reachable" risk, not
+ * an edge case), joins a lone `{` onto the header line it opens, and drops
+ * heredoc bodies entirely — their text is data, never executed statements.
+ * A `<<<` here-string is not mistaken for a `<<` heredoc, a non-`-` heredoc's
+ * terminator is matched literally (only `<<-` strips leading tabs), and a
+ * heredoc delimiter may contain `-`/`_` as well as alphanumerics — all three
+ * were real detection gaps (#693 review round 15), not narrowed away.
  */
 function logicalLines(content: string): string[] {
   const result: string[] = [];
   const rawLines = content.split('\n');
-  const heredocQueue: string[] = [];
+  const heredocQueue: { terminator: string; stripTabs: boolean }[] = [];
 
   for (let i = 0; i < rawLines.length; i += 1) {
     if (heredocQueue.length > 0) {
-      if (rawLines[i].trim() === heredocQueue[0]) heredocQueue.shift();
+      const { terminator, stripTabs } = heredocQueue[0];
+      const withoutCR = rawLines[i].replace(/\r$/, '');
+      const candidate = stripTabs ? withoutCR.replace(/^\t+/, '') : withoutCR;
+      if (candidate === terminator) heredocQueue.shift();
       continue;
     }
 
-    let line = stripComment(rawLines[i]).trim();
-    while (line.endsWith('\\') && !line.endsWith('\\\\')) {
+    let line = rawLines[i].trim();
+    while (i + 1 < rawLines.length && (
+      (line.endsWith('\\') && !line.endsWith('\\\\')) || line.endsWith('&&') || line.endsWith('||')
+    )) {
       i += 1;
-      line = `${line.slice(0, -1).trimEnd()} ${(i < rawLines.length ? stripComment(rawLines[i]) : '').trim()}`.trim();
+      const next = rawLines[i].trim();
+      line = line.endsWith('\\') ? `${line.slice(0, -1).trimEnd()} ${next}`.trim() : `${line} ${next}`.trim();
     }
     if (!line) continue;
 
-    for (const heredoc of line.matchAll(/<<-?\s*(['"]?)(\w+)\1/g)) {
-      heredocQueue.push(heredoc[2]);
-    }
+    // A self-contained one-liner (`if ...; then ...; fi`, `case ... esac`,
+    // `for ...; do ...; done`) opens and closes on the same line — net zero
+    // depth change, not an unclosed open that corrupts tracking for every
+    // real statement after it (#693 review round 13/15).
+    if (/^(?:if|for|while|until|case)\b.*;\s*(?:fi|done|esac)\s*$/.test(line)) continue;
 
     if (line === '{' && result.length > 0) {
       result[result.length - 1] += ' {';
       continue;
     }
+
+    for (const heredoc of line.matchAll(/(?<!<)<<(-?)(?!<)\s*(['"]?)([\w-]+)\2/g)) {
+      heredocQueue.push({ terminator: heredoc[3], stripTabs: heredoc[1] === '-' });
+    }
+
     result.push(line);
   }
   return result;
@@ -327,96 +294,53 @@ function logicalLines(content: string): string[] {
 
 /**
  * Whether `content` runs a `source`/`.` command reaching `name`, restricted
- * to the forms this scanner can reason about without a real shell parser
- * (#693 review rounds 11-12 named the gaps a plain substring/`&&`/`;` split
- * left open, one at a time):
+ * to exactly two forms, each matched as a complete logical line with nothing
+ * else on it:
  *
- * - **Unconditional**: a bare `. REF` / `source REF`, as its own `;`-joined
- *   statement, or the leftmost command before the first `&&`/`||` in one
- *   (both operators always attempt their left side first). Nothing inside
- *   an `if`, `for`/`while`/`until`, `case`, or a function/brace-group body
- *   counts, no matter how it is written — none of those bodies are
- *   guaranteed to run, and this scanner has no way to tell a body that
- *   would from one that wouldn't, so trusting some and not others would
- *   just be guessing (the same false "reachable" #682 regression the
- *   sticky resolver exists to prevent).
- * - **Existence-gated `&&`**: `test -f REF && . REF` / `[ -f REF ] && . REF`,
- *   self-referential only — the tested path and the sourced path must both
- *   be `name`, the one `&&` condition this scanner can independently verify
- *   (by visiting that candidate itself later in the search). A condition
- *   testing anything else grants nothing beyond its own unconditional left
- *   side. Further `&&`-chained commands after the guarded source don't
- *   change whether it ran, so they don't affect the match either (#693
- *   review round 13).
- * - **`||` fallback**: `A || B`, where `A` is a source of some other
- *   candidate. `B` runs only if `A` fails, which is verifiable in exactly
- *   one case — `A`'s own target does not exist on disk — so `B` counts
- *   only then.
+ * - **Bare unconditional**: `. REF` / `source REF`, alone.
+ * - **Self-referential existence guard**: `test -f REF && . REF` /
+ *   `[ -f REF ] && . REF` — the literal line Git for Windows itself
+ *   generates.
  *
- * A file, or a shell construct, this cannot resolve one way or the other is
- * never trusted either way: the caller falls back to the order-based pick,
- * which is safe (at worst a harmless duplicate block, the pre-#693-fix
- * behavior) — never a false "reachable" that would silently reintroduce
- * #682.
+ * Earlier rounds (#693 review rounds 11-14) grew this into a much larger
+ * ad-hoc grammar chasing one adversarial shell construct at a time —
+ * `;`/`&&`/`||` statement splitting, quote- and escape-aware tokenizing,
+ * N-way `||` fallback chains, trailing arguments and redirections on the
+ * source itself. Round 15 correctly called that out as exactly the kind of
+ * unbounded, speculative parser this repo's engineering guidance rejects:
+ * matching arbitrary shell semantics without a real shell is undecidable in
+ * general, and no amount of one-more-regex ever finishes it. Recognizing
+ * only these two literal, common, machine-generated-or-standard forms keeps
+ * the same safety property — nothing outside them is ever trusted, so the
+ * worst outcome is a harmless duplicate block (the pre-#693-fix behavior),
+ * never a false "reachable" that would reintroduce #682 — without the
+ * unbounded grammar, or the endless stream of parsing bugs that came with
+ * it (quoted/escaped separators, pipes, backgrounding, heredoc edge cases).
+ *
+ * Nothing inside an `if`/`for`/`while`/`until`/`case`/`select`, a function,
+ * or a `(...)`/`{...}` group counts (`logicalLines`/`opensUnverifiedBlock`
+ * skip it), and nothing textually after an unconditional, top-level
+ * `return`/`exit` counts either (tracked below as a single flag — cheap
+ * enough to keep without reopening the general-parser question).
  */
-async function referencesCandidate(content: string, name: string, home: string): Promise<boolean> {
+async function referencesCandidate(content: string, name: string): Promise<boolean> {
   const ref = homeRelativeRef(name);
-  const refOnly = new RegExp(`^${ref}$`);
-  const existenceGuard = new RegExp(`^(?:test\\s+-f\\s+${ref}|\\[\\s+-f\\s+${ref}\\s*\\])$`);
-  // The target is the first whitespace-run-delimited argument; anything after
-  // it (extra positional args passed to the sourced script, a redirection
-  // like `2>/dev/null`) doesn't change whether the source itself runs (#693
-  // review round 14).
-  const sourceOf = /^(?:\.|source)\s+(\S+)(?:\s+\S.*)?$/;
+  const bareSource = new RegExp(`^(?:\\.|source)\\s+${ref}$`);
+  const existenceGuard = new RegExp(
+    `^(?:test\\s+-f\\s+${ref}|\\[\\s+-f\\s+${ref}\\s*\\])\\s*&&\\s*(?:\\.|source)\\s+${ref}$`,
+  );
 
   let depth = 0;
   let halted = false;
   for (const line of logicalLines(content)) {
-    for (const statement of splitTopLevel(line, ';').map((s) => s.trim()).filter(Boolean)) {
-      if (opensUnverifiedBlock(statement)) { depth += 1; continue; }
-      if (closesUnverifiedBlock(statement)) { depth = Math.max(0, depth - 1); continue; }
-      if (depth > 0) continue;
+    if (opensUnverifiedBlock(line)) { depth += 1; continue; }
+    if (closesUnverifiedBlock(line)) { depth = Math.max(0, depth - 1); continue; }
+    if (depth > 0) continue;
 
-      // `return`/`exit`, unconditional and at top level, ends this file's
-      // control flow right there — nothing textually after it, however it
-      // looks, ever runs (#693 review round 14).
-      if (/^(?:return|exit)(?:\s+\S+)?$/.test(statement)) { halted = true; continue; }
-      if (halted) continue;
+    if (/^(?:return|exit)(?:\s+\S+)?$/.test(line)) { halted = true; continue; }
+    if (halted) continue;
 
-      // Existence-gated `&&`: `test -f REF && . REF`, self-referential, with
-      // any further `&&`-chained commands after it not affecting whether the
-      // guarded source itself ran (#693 review round 13).
-      const andParts = splitTopLevel(statement, '&&').map((s) => s.trim());
-      if (andParts.length >= 2 && existenceGuard.test(andParts[0])) {
-        const guarded = andParts[1].match(sourceOf);
-        if (guarded && refOnly.test(guarded[1])) return true;
-      }
-
-      // `A || B || C || ...`: each operand is reached only if every operand
-      // before it is a recognized source of a target verifiably missing from
-      // disk (the one way a `||` fallback is guaranteed to run) — the
-      // leftmost is always attempted regardless. An operand this can't
-      // resolve one way or the other stops the chain from being trusted any
-      // further (#693 review round 14 generalized this past two operands).
-      const orParts = splitTopLevel(statement, '||').map((s) => s.trim());
-      if (orParts.length >= 2) {
-        let reachable = true;
-        for (const part of orParts) {
-          const m = part.match(sourceOf);
-          if (reachable && m && refOnly.test(m[1])) return true;
-          if (!reachable) break;
-          const p = m && homeRelativePath(m[1], home);
-          reachable = !!p && !(await pathExists(p));
-        }
-        continue;
-      }
-
-      // The leftmost command before the first `&&` (if any) is always
-      // attempted, same as `||`'s left side above — only its right side's
-      // extra condition is unverifiable in general.
-      const andLeft = andParts[0].match(sourceOf);
-      if (andLeft && refOnly.test(andLeft[1])) return true;
-    }
+    if (bareSource.test(line) || existenceGuard.test(line)) return true;
   }
   return false;
 }
@@ -473,7 +397,7 @@ export async function resolveActiveShellProfile(
 
     for (const name of SHELL_PROFILE_CANDIDATE_NAMES) {
       const candidate = path.join(home, name);
-      if (candidate !== current && !visited.has(candidate) && await referencesCandidate(content, name, home)) {
+      if (candidate !== current && !visited.has(candidate) && await referencesCandidate(content, name)) {
         queue.push(candidate);
       }
     }

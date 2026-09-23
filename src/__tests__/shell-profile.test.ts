@@ -229,39 +229,23 @@ describe('resolveActiveShellProfile', () => {
     expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.profile'));
   });
 
-  // Regression (#693 review round 10): splitting on `||` treated its
-  // right-hand side as unconditionally reached, but it only runs if the left
-  // side fails — undetermined here. A stale block behind `||` must not win
-  // over a working one the left side already reaches.
-  it('does not treat the right side of || as reachable', async () => {
-    // Both .profile and .bashrc carry a valid block for this scope; the
-    // point is which one the resolver *reaches* through the || line, not
-    // which one has a well-formed block. .bashrc sorts earlier than
-    // .profile in SHELL_PROFILE_CANDIDATE_NAMES, so a naive "any referenced
-    // candidate in priority order" search would wrongly land on .bashrc even
-    // though it only runs if the left side (.profile) fails.
+  // Regression (#693 review round 15): the scanner no longer recognizes `||`
+  // fallback chains at all — round 14's N-way generalization, and round 11's
+  // two-operand version before it, kept needing another regex for another
+  // adversarial shape (a target that exists but fails to source, mixed
+  // `&&`/`||`, three-plus operands...). Recognizing only the two literal,
+  // common forms (bare source, self-referential existence guard) means a
+  // `||` line of any shape now falls back to the order-based pick — a
+  // harmless duplicate block, never a wrong one.
+  it('does not treat either side of a || fallback as reachable', async () => {
     await fse.writeFile(
       path.join(homeDir, '.bash_profile'),
       'source ~/.profile || source ~/.bashrc\n',
     );
-    await fse.writeFile(path.join(homeDir, '.profile'), teamaiBlock());
+    // .profile is deliberately absent, so a real shell would reach .bashrc —
+    // out of scope now regardless.
     await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
-    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.profile'));
-  });
-
-  // Regression (#693 review round 11): the right side of `||` genuinely is
-  // guaranteed to run when the left side's own target file does not exist —
-  // the one case this scanner can verify without a real shell. Failing to
-  // recognize it falls back to injecting a duplicate, which round 10's fix
-  // was meant to avoid for exactly this shape of line.
-  it('does treat the right side of || as reachable when the left side\'s target is missing', async () => {
-    await fse.writeFile(
-      path.join(homeDir, '.bash_profile'),
-      'source ~/.profile || source ~/.bashrc\n',
-    );
-    // .profile is deliberately absent.
-    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
-    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
   });
 
   // Regression (#693 review round 11): `&&` only establishes reachability
@@ -312,13 +296,14 @@ describe('resolveActiveShellProfile', () => {
     expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
   });
 
-  // Regression (#693 review round 12): `&&`'s left side is always attempted,
-  // the same as `||`'s — a trailing unrelated command after it (`&& echo
-  // ready`) does not make the source itself conditional.
-  it('treats the left side of && as reachable even when the right side is unrelated', async () => {
+  // Regression (#693 review round 15): only the self-referential existence
+  // guard is recognized as an `&&` form now — a bare source followed by an
+  // unrelated `&&`-chained command is no longer a special case, it is just a
+  // line that is not one of the two recognized forms, so it falls back.
+  it('does not treat a bare source followed by an unrelated && command as reachable', async () => {
     await fse.writeFile(path.join(homeDir, '.bash_profile'), 'source ~/.bashrc && echo ready\n');
     await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
-    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
   });
 
   // Regression (#693 review round 12): only `if` nesting was tracked, so a
@@ -379,13 +364,19 @@ describe('resolveActiveShellProfile', () => {
     expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
   });
 
-  it('treats an existence-gated source as reachable even with further &&-chained commands', async () => {
+  // Regression (#693 review round 15): the existence guard is only
+  // recognized as a complete line now — round 13's tolerance for further
+  // `&&`-chained commands after it is out of scope again, since it was part
+  // of the general trailing-content handling that also caused the pipe/
+  // background false positive below. A guard with anything appended falls
+  // back to the order-based pick.
+  it('does not treat an existence-gated source with further &&-chained commands as reachable', async () => {
     await fse.writeFile(
       path.join(homeDir, '.bash_profile'),
       '[ -f ~/.bashrc ] && . ~/.bashrc && export READY=1\n',
     );
     await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
-    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
   });
 
   it('does not treat a source inside a comment after a semicolon as reachable', async () => {
@@ -442,30 +433,42 @@ describe('resolveActiveShellProfile', () => {
     expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
   });
 
-  it('treats a source with a trailing redirection as reachable', async () => {
+  // Regression (#693 review round 15): a bare source is only recognized as
+  // its own complete line now — trailing content of any kind (a redirection,
+  // a pipe, a background `&`) makes it not one of the two recognized forms,
+  // so it falls back rather than trying to reason about what the trailing
+  // content does to reachability.
+  it('does not treat a source with a trailing redirection as reachable', async () => {
     await fse.writeFile(
       path.join(homeDir, '.bash_profile'),
       'source ~/.bashrc 2>/dev/null\n',
     );
     await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
-    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
   });
 
-  it('treats the last operand of a three-way || fallback as reachable when the earlier ones are missing', async () => {
+  // Regression (#693 review round 15): `source ~/.bashrc | cat` and
+  // `source ~/.bashrc &` both run the source in a subshell — a pipeline
+  // member and a backgrounded job never propagate exports to the login
+  // shell — so trusting trailing content indiscriminately (as a prior round
+  // did, to recognize legitimate extra arguments and redirections) actively
+  // reintroduced a false "reachable" for these. The strict, line-only match
+  // rejects all trailing content uniformly, closing this without needing to
+  // special-case which trailing forms are safe.
+  it('does not treat a source piped or backgrounded as reachable', async () => {
     await fse.writeFile(
       path.join(homeDir, '.bash_profile'),
-      'source ~/.profile || source ~/.bash_login || source ~/.bashrc\n',
+      'source ~/.bashrc | cat\nsource ~/.bashrc &\n',
     );
     await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
-    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
   });
 
-  it('does not treat the last operand of a three-way || fallback as reachable when an earlier one exists', async () => {
+  it('does not treat either side of a three-way || fallback as reachable', async () => {
     await fse.writeFile(
       path.join(homeDir, '.bash_profile'),
       'source ~/.profile || source ~/.bash_login || source ~/.bashrc\n',
     );
-    await fse.writeFile(path.join(homeDir, '.profile'), '# unrelated\n');
     await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
     expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
   });
@@ -477,6 +480,86 @@ describe('resolveActiveShellProfile', () => {
     );
     await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
     expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  // Regression (#693 review round 15): `<<<EOF` is a here-string (a single
+  // inline value, no body to skip), not a `<<EOF` heredoc — matching it as
+  // one swallowed every following line as heredoc "body" waiting for a
+  // terminator that never arrives, hiding a real source further down.
+  it('does not mistake a here-string for a heredoc and lose a later source', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'cat <<<EOF\nsource ~/.bashrc\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+  });
+
+  // Regression (#693 review round 15): a non-`-` heredoc's terminator must
+  // match the line literally (no stripped indentation) — an indented line
+  // that merely looks like the terminator is heredoc body data, not the
+  // close, so a real source right after the true (unindented) terminator
+  // must still be found.
+  it('does not end a non-dash heredoc early on an indented look-alike terminator line', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'cat <<EOF\n  EOF\nEOF\nsource ~/.bashrc\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+  });
+
+  // Regression (#693 review round 15): a heredoc delimiter isn't limited to
+  // `\w` — `END-CONFIG` (with a hyphen) is a valid, real-world delimiter;
+  // failing to recognize it as opening a heredoc meant its body was scanned
+  // as real statements.
+  it('recognizes a hyphenated heredoc delimiter and skips its body', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'cat <<END-CONFIG\nsource ~/.bashrc\nEND-CONFIG\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  // Regression (#693 review round 15): a trailing `&&`/`||` at end of line is
+  // real, unremarkable shell continuation — no backslash needed — so the
+  // next physical line is still part of the same conditional, not an
+  // independent, unconditional statement.
+  it('does not treat a source after an operator-end continuation as reachable', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      '[ "$TERM_PROGRAM" = vscode ] &&\nsource ~/.bashrc\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  it('recognizes an existence guard split across an operator-end continuation', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      '[ -f ~/.bashrc ] &&\n. ~/.bashrc\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+  });
+
+  it('does not treat a source inside a select body as reachable', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'select opt in a b; do\n  . ~/.bashrc\ndone\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  it('does not stop recognizing later unconditional sources after a compound closer with a redirection', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      '(\n  echo hi\n) >/dev/null\nsource ~/.bashrc\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
   });
 });
 
