@@ -248,6 +248,49 @@ describe('resolveActiveShellProfile', () => {
     await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
     expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.profile'));
   });
+
+  // Regression (#693 review round 11): the right side of `||` genuinely is
+  // guaranteed to run when the left side's own target file does not exist —
+  // the one case this scanner can verify without a real shell. Failing to
+  // recognize it falls back to injecting a duplicate, which round 10's fix
+  // was meant to avoid for exactly this shape of line.
+  it('does treat the right side of || as reachable when the left side\'s target is missing', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'source ~/.profile || source ~/.bashrc\n',
+    );
+    // .profile is deliberately absent.
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+  });
+
+  // Regression (#693 review round 11): `&&` only establishes reachability
+  // when this scanner can independently verify the guarding condition — the
+  // self-referential existence test. A condition testing anything else
+  // (here, an environment variable) is not verifiable, so a stale block
+  // behind it must not outrank a genuinely unwritten, currently-read file.
+  it('does not treat a non-existence && condition as reachable', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      '[ "$TERM_PROGRAM" = vscode ] && source ~/.bashrc\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  // Regression (#693 review round 11): a source line's own text looks
+  // identical whether it sits at top level or three lines inside an `if`
+  // block this scanner cannot evaluate. Nothing inside an `if` is trusted,
+  // conditional or not, so a block only reachable through one is not
+  // preferred over the order-based pick.
+  it('does not treat a source nested inside an if block as reachable', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'if [ -n "$BASH_VERSION" ]; then\n  . ~/.bashrc\nfi\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
 });
 
 describe('envBlockSourcesPath', () => {

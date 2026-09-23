@@ -202,38 +202,82 @@ export function envBlockReferencesDataHome(block: string, envShPath: string): bo
   return false;
 }
 
-/**
- * Whether `content` runs a `source`/`.` command on a home-relative reference
- * to `name` (`~/.bashrc`, `$HOME/.bashrc`, `${HOME}/.bashrc`) — the shape a
- * real forwarding line takes, e.g. Git for Windows' generated
- * `test -f ~/.bashrc && . ~/.bashrc`.
- *
- * Deliberately narrower than a substring search (#693 review round 9): that
- * matched a comment mentioning the filename (inert, never executed) and a
- * same-prefixed but different file (`~/.bashrc.local` contains `~/.bashrc`
- * as a substring). Comment lines are dropped outright; each remaining line
- * is split on `&&`/`||`/`;` into statements, and a statement only counts
- * when its first word is literally `.` or `source` and its second word is
- * exactly the home-relative reference — anchored, so a longer filename
- * cannot satisfy it by prefix.
- */
-function referencesCandidate(content: string, name: string): boolean {
+/** `~/name`, `$HOME/name` or `${HOME}/name`, optionally quoted, as a token this scanner accepts as a reference to `name`. */
+function homeRelativeRef(name: string): string {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const target = new RegExp(`^["']?(?:~|\\$\\{?HOME\\}?)/${escaped}(?![\\w.-])["']?$`);
+  return `["']?(?:~|\\$\\{?HOME\\}?)/${escaped}(?![\\w.-])["']?`;
+}
+
+/** If `token` is a home-relative reference (`~/name`, `$HOME/name`, `${HOME}/name`), the real path it names. */
+function homeRelativePath(token: string, home: string): string | null {
+  const stripped = token.replace(/^["']/, '').replace(/["']$/, '');
+  const m = stripped.match(/^(?:~|\$\{?HOME\}?)\/(.+)$/);
+  return m ? path.join(home, m[1]) : null;
+}
+
+/**
+ * Whether `content` runs a `source`/`.` command reaching `name`
+ * (`~/.bashrc`, `$HOME/.bashrc`, `${HOME}/.bashrc`), restricted to the forms
+ * this scanner can reason about without a real shell parser (#693 review
+ * round 11 named two more gaps a bare substring/`&&`/`;` split left open):
+ *
+ * - **Unconditional**: a bare `. REF` / `source REF`, as its own `;`-joined
+ *   statement. Nothing inside an `if` block counts, conditional or not —
+ *   the condition is opaque to a line scanner, so a source sitting three
+ *   lines under `if [ -n "$BASH_VERSION" ]; then` is no more verifiable
+ *   than one under `if [ "$TERM_PROGRAM" = vscode ]; then`, and trusting
+ *   either would risk the same false "reachable" #682 regression the
+ *   sticky resolver exists to prevent.
+ * - **Existence-gated**: `test -f REF && . REF` / `[ -f REF ] && . REF`,
+ *   self-referential only — the tested path and the sourced path must both
+ *   be `name`, the one condition this scanner can independently verify (by
+ *   visiting that candidate itself later in the search). A condition
+ *   testing anything else grants nothing.
+ * - **`||` fallback**: `A || B`, where `A` is a source of some other
+ *   candidate. The left side of `||` is always attempted, so it counts
+ *   unconditionally; the right side runs only if the left one fails, which
+ *   is verifiable in exactly one case — `A`'s own target does not exist on
+ *   disk — so `B` counts only then.
+ *
+ * A file, or a shell construct, this cannot resolve one way or the other is
+ * never trusted either way: the caller falls back to the order-based pick,
+ * which is safe (at worst a harmless duplicate block, the pre-#693-fix
+ * behavior) — never a false "reachable" that would silently reintroduce
+ * #682.
+ */
+async function referencesCandidate(content: string, name: string, home: string): Promise<boolean> {
+  const ref = homeRelativeRef(name);
+  const refOnly = new RegExp(`^${ref}$`);
+  const existenceGated = new RegExp(
+    `^(?:test\\s+-f\\s+${ref}|\\[\\s+-f\\s+${ref}\\s*\\])\\s*&&\\s*(?:\\.|source)\\s+${ref}$`,
+  );
+  const sourceOf = /^(?:\.|source)\s+(\S+)$/;
+
+  let ifDepth = 0;
   for (const rawLine of content.split('\n')) {
-    if (rawLine.trimStart().startsWith('#')) continue;
-    // Only `&&`/`;` split into statements that are still unconditionally
-    // attempted (or gated on the referenced candidate's own existence, which
-    // is independently re-checked by reading that candidate). `||`'s right
-    // side runs only if its left side fails — something not established
-    // here — so it is left folded into the same statement as its left side:
-    // that statement's first `.`/`source` command (the unconditional one)
-    // still matches, but a `source` sitting only after `||` never does.
-    for (const statement of rawLine.split(/&&|;/)) {
-      const tokens = statement.trim().split(/\s+/);
-      if (tokens.length >= 2 && (tokens[0] === '.' || tokens[0] === 'source') && target.test(tokens[1])) {
-        return true;
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (/^if\b/.test(line)) { ifDepth += 1; continue; }
+    if (/^fi\b/.test(line)) { ifDepth = Math.max(0, ifDepth - 1); continue; }
+    if (ifDepth > 0) continue;
+
+    for (const statement of line.split(';').map((s) => s.trim()).filter(Boolean)) {
+      if (existenceGated.test(statement)) return true;
+
+      const orParts = statement.split('||').map((s) => s.trim());
+      if (orParts.length === 2) {
+        const left = orParts[0].match(sourceOf);
+        const right = orParts[1].match(sourceOf);
+        if (left && refOnly.test(left[1])) return true;
+        if (left && right && refOnly.test(right[1])) {
+          const leftPath = homeRelativePath(left[1], home);
+          if (leftPath && !(await pathExists(leftPath))) return true;
+        }
+        continue;
       }
+
+      const plain = statement.match(sourceOf);
+      if (plain && refOnly.test(plain[1])) return true;
     }
   }
   return false;
@@ -291,7 +335,7 @@ export async function resolveActiveShellProfile(
 
     for (const name of SHELL_PROFILE_CANDIDATE_NAMES) {
       const candidate = path.join(home, name);
-      if (candidate !== current && !visited.has(candidate) && referencesCandidate(content, name)) {
+      if (candidate !== current && !visited.has(candidate) && await referencesCandidate(content, name, home)) {
         queue.push(candidate);
       }
     }
