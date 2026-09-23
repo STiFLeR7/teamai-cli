@@ -203,41 +203,65 @@ export function envBlockReferencesDataHome(block: string, envShPath: string): bo
 }
 
 /** `~/name`, `$HOME/name` or `${HOME}/name`, optionally quoted, as a token this scanner accepts as a reference to `name`. */
+/**
+ * `~/name` (never quoted — a shell does not tilde-expand inside any quotes)
+ * or `$HOME/name` / `${HOME}/name` (unquoted or double-quoted — a shell
+ * does not variable-expand inside single quotes) as a token this scanner
+ * accepts as a reference to `name`. `source "~/.bashrc"` and
+ * `source '$HOME/.bashrc'` both source a literal, near-certainly
+ * nonexistent path, not `name` — a reference that "looks right" but would
+ * never actually reach the file must not be trusted (#693 review round 12).
+ */
 function homeRelativeRef(name: string): string {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return `["']?(?:~|\\$\\{?HOME\\}?)/${escaped}(?![\\w.-])["']?`;
+  const suffix = `${escaped}(?![\\w.-])`;
+  return `(?:~/${suffix}|\\$\\{?HOME\\}?/${suffix}|"\\$\\{?HOME\\}?/${suffix}")`;
 }
 
-/** If `token` is a home-relative reference (`~/name`, `$HOME/name`, `${HOME}/name`), the real path it names. */
+/** If `token` is a home-relative reference by the same rule `homeRelativeRef` accepts, the real path it names. */
 function homeRelativePath(token: string, home: string): string | null {
-  const stripped = token.replace(/^["']/, '').replace(/["']$/, '');
-  const m = stripped.match(/^(?:~|\$\{?HOME\}?)\/(.+)$/);
+  let m = token.match(/^~\/(.+)$/);
+  if (!m) m = token.match(/^\$\{?HOME\}?\/(.+)$/);
+  if (!m) m = token.match(/^"\$\{?HOME\}?\/(.+)"$/);
   return m ? path.join(home, m[1]) : null;
 }
 
+/** Whether `line` opens, or closes, a construct whose body is not guaranteed to run — `if`, `for`/`while`/`until`, `case`, or a function/brace group. */
+function opensUnverifiedBlock(line: string): boolean {
+  return /^(?:if|for|while|until|case)\b/.test(line)
+    || /^function\s+\S/.test(line)
+    || /^\S+\s*\(\)\s*\{?\s*$/.test(line)
+    || line === '{';
+}
+function closesUnverifiedBlock(line: string): boolean {
+  return /^(?:fi|done|esac)\b/.test(line) || line === '}';
+}
+
 /**
- * Whether `content` runs a `source`/`.` command reaching `name`
- * (`~/.bashrc`, `$HOME/.bashrc`, `${HOME}/.bashrc`), restricted to the forms
- * this scanner can reason about without a real shell parser (#693 review
- * round 11 named two more gaps a bare substring/`&&`/`;` split left open):
+ * Whether `content` runs a `source`/`.` command reaching `name`, restricted
+ * to the forms this scanner can reason about without a real shell parser
+ * (#693 review rounds 11-12 named the gaps a plain substring/`&&`/`;` split
+ * left open, one at a time):
  *
  * - **Unconditional**: a bare `. REF` / `source REF`, as its own `;`-joined
- *   statement. Nothing inside an `if` block counts, conditional or not —
- *   the condition is opaque to a line scanner, so a source sitting three
- *   lines under `if [ -n "$BASH_VERSION" ]; then` is no more verifiable
- *   than one under `if [ "$TERM_PROGRAM" = vscode ]; then`, and trusting
- *   either would risk the same false "reachable" #682 regression the
- *   sticky resolver exists to prevent.
- * - **Existence-gated**: `test -f REF && . REF` / `[ -f REF ] && . REF`,
+ *   statement, or the leftmost command before the first `&&`/`||` in one
+ *   (both operators always attempt their left side first). Nothing inside
+ *   an `if`, `for`/`while`/`until`, `case`, or a function/brace-group body
+ *   counts, no matter how it is written — none of those bodies are
+ *   guaranteed to run, and this scanner has no way to tell a body that
+ *   would from one that wouldn't, so trusting some and not others would
+ *   just be guessing (the same false "reachable" #682 regression the
+ *   sticky resolver exists to prevent).
+ * - **Existence-gated `&&`**: `test -f REF && . REF` / `[ -f REF ] && . REF`,
  *   self-referential only — the tested path and the sourced path must both
- *   be `name`, the one condition this scanner can independently verify (by
- *   visiting that candidate itself later in the search). A condition
- *   testing anything else grants nothing.
+ *   be `name`, the one `&&` condition this scanner can independently verify
+ *   (by visiting that candidate itself later in the search). A condition
+ *   testing anything else grants nothing beyond its own unconditional left
+ *   side.
  * - **`||` fallback**: `A || B`, where `A` is a source of some other
- *   candidate. The left side of `||` is always attempted, so it counts
- *   unconditionally; the right side runs only if the left one fails, which
- *   is verifiable in exactly one case — `A`'s own target does not exist on
- *   disk — so `B` counts only then.
+ *   candidate. `B` runs only if `A` fails, which is verifiable in exactly
+ *   one case — `A`'s own target does not exist on disk — so `B` counts
+ *   only then.
  *
  * A file, or a shell construct, this cannot resolve one way or the other is
  * never trusted either way: the caller falls back to the order-based pick,
@@ -253,13 +277,13 @@ async function referencesCandidate(content: string, name: string, home: string):
   );
   const sourceOf = /^(?:\.|source)\s+(\S+)$/;
 
-  let ifDepth = 0;
+  let depth = 0;
   for (const rawLine of content.split('\n')) {
     const line = rawLine.trim();
     if (!line || line.startsWith('#')) continue;
-    if (/^if\b/.test(line)) { ifDepth += 1; continue; }
-    if (/^fi\b/.test(line)) { ifDepth = Math.max(0, ifDepth - 1); continue; }
-    if (ifDepth > 0) continue;
+    if (opensUnverifiedBlock(line)) { depth += 1; continue; }
+    if (closesUnverifiedBlock(line)) { depth = Math.max(0, depth - 1); continue; }
+    if (depth > 0) continue;
 
     for (const statement of line.split(';').map((s) => s.trim()).filter(Boolean)) {
       if (existenceGated.test(statement)) return true;
@@ -276,8 +300,11 @@ async function referencesCandidate(content: string, name: string, home: string):
         continue;
       }
 
-      const plain = statement.match(sourceOf);
-      if (plain && refOnly.test(plain[1])) return true;
+      // The leftmost command before the first `&&` (if any) is always
+      // attempted, same as `||`'s left side above — only its right side's
+      // extra condition is unverifiable in general.
+      const andLeft = statement.split('&&')[0].trim().match(sourceOf);
+      if (andLeft && refOnly.test(andLeft[1])) return true;
     }
   }
   return false;

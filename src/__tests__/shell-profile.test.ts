@@ -291,6 +291,66 @@ describe('resolveActiveShellProfile', () => {
     await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
     expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
   });
+
+  // Regression (#693 review round 12): a shell never tilde-expands inside
+  // any quotes and never variable-expands inside single quotes, so
+  // `source "~/.bashrc"` and `source '$HOME/.bashrc'` both source a
+  // literal, near-certainly nonexistent path — a reference that "looks
+  // right" but would never actually run must not be trusted.
+  it('does not treat an invalidly-quoted reference as reachable', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'source "~/.bashrc"\nsource \'$HOME/.bashrc\'\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  it('does treat a double-quoted $HOME reference as reachable', async () => {
+    await fse.writeFile(path.join(homeDir, '.bash_profile'), 'source "$HOME/.bashrc"\n');
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+  });
+
+  // Regression (#693 review round 12): `&&`'s left side is always attempted,
+  // the same as `||`'s — a trailing unrelated command after it (`&& echo
+  // ready`) does not make the source itself conditional.
+  it('treats the left side of && as reachable even when the right side is unrelated', async () => {
+    await fse.writeFile(path.join(homeDir, '.bash_profile'), 'source ~/.bashrc && echo ready\n');
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+  });
+
+  // Regression (#693 review round 12): only `if` nesting was tracked, so a
+  // source inside an uncalled function, a non-selected `case` arm, or a
+  // loop body — none of them guaranteed to run any more than an `if` body
+  // is — was wrongly treated as unconditional.
+  it('does not treat a source inside a function body as reachable', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'my_func() {\n  . ~/.bashrc\n}\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  it('does not treat a source inside a case arm as reachable', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'case "$-" in\n  *i*) . ~/.bashrc ;;\nesac\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  it('does not treat a source inside a loop body as reachable', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'for f in ~/.bashrc; do\n  . ~/.bashrc\ndone\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
 });
 
 describe('envBlockSourcesPath', () => {
