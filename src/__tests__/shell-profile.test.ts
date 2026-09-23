@@ -172,6 +172,45 @@ describe('resolveActiveShellProfile', () => {
     await fse.writeFile(path.join(homeDir, '.profile'), '');
     expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.profile'));
   });
+
+  // Regression (#693 review round 9): a bare substring search matched a
+  // comment mentioning the filename (never executed) and a different,
+  // longer-named file sharing the same prefix.
+  it('does not stick to a candidate merely mentioned in a comment', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      '# source ~/.bashrc\nunrelated content\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  it('does not stick to a different, longer-named file sharing the same prefix', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'source ~/.bashrc.local\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  // Regression (#693 review round 9): the resolver only followed one hop of
+  // sourcing, so a chain like .bash_profile -> .profile -> .bashrc (the
+  // common Debian .profile pattern, sourcing .bashrc for interactive
+  // shells) missed a block two hops away and would have injected a
+  // duplicate into .bash_profile instead of reusing .bashrc.
+  it('follows a two-hop sourcing chain to reach a block (.bash_profile -> .profile -> .bashrc)', async () => {
+    await fse.writeFile(path.join(homeDir, '.bash_profile'), '. ~/.profile\n');
+    await fse.writeFile(path.join(homeDir, '.profile'), '[ -f ~/.bashrc ] && . ~/.bashrc\n');
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+  });
+
+  it('does not hang on a reference cycle and falls back to the order-based pick', async () => {
+    await fse.writeFile(path.join(homeDir, '.bash_profile'), 'source ~/.profile\n');
+    await fse.writeFile(path.join(homeDir, '.profile'), 'source ~/.bash_profile\n');
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
 });
 
 describe('envBlockSourcesPath', () => {

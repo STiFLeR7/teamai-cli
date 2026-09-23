@@ -203,31 +203,60 @@ export function envBlockReferencesDataHome(block: string, envShPath: string): bo
 }
 
 /**
+ * Whether `content` runs a `source`/`.` command on a home-relative reference
+ * to `name` (`~/.bashrc`, `$HOME/.bashrc`, `${HOME}/.bashrc`) — the shape a
+ * real forwarding line takes, e.g. Git for Windows' generated
+ * `test -f ~/.bashrc && . ~/.bashrc`.
+ *
+ * Deliberately narrower than a substring search (#693 review round 9): that
+ * matched a comment mentioning the filename (inert, never executed) and a
+ * same-prefixed but different file (`~/.bashrc.local` contains `~/.bashrc`
+ * as a substring). Comment lines are dropped outright; each remaining line
+ * is split on `&&`/`||`/`;` into statements, and a statement only counts
+ * when its first word is literally `.` or `source` and its second word is
+ * exactly the home-relative reference — anchored, so a longer filename
+ * cannot satisfy it by prefix.
+ */
+function referencesCandidate(content: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const target = new RegExp(`^["']?(?:~|\\$\\{?HOME\\}?)/${escaped}(?![\\w.-])["']?$`);
+  for (const rawLine of content.split('\n')) {
+    if (rawLine.trimStart().startsWith('#')) continue;
+    for (const statement of rawLine.split(/&&|\|\||;/)) {
+      const tokens = statement.trim().split(/\s+/);
+      if (tokens.length >= 2 && (tokens[0] === '.' || tokens[0] === 'source') && target.test(tokens[1])) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * Resolve which shell profile file this scope's env block belongs in.
  *
  * Starts from `detectShellProfile`'s order-based pick — the file the current
- * environment actually reads — and only diverges from it in two cases, both
- * narrower than "any candidate with a block wins" (#693 review round 8: that
- * broader rule let a stale pre-#682 block in `.bashrc` outrank a genuinely
- * unwritten, currently-read `.profile`, silently reintroducing #682 for
- * exactly the installs upgrading through this fix, with `doctor` no longer
- * able to catch it since the stale block is well-formed where it sits):
+ * environment actually reads — and follows the chain of files it actually
+ * `source`s (transitively, with cycle protection) looking for one that
+ * already carries this scope's block. A candidate the chain never reaches is
+ * never preferred, regardless of what it contains: an earlier version
+ * matched any candidate with a block anywhere (#693 review round 8: a stale
+ * pre-#682 block in `.bashrc` then outranked a genuinely unwritten,
+ * currently-read `.profile`, reintroducing #682 for exactly the installs
+ * upgrading through this fix) and checked only one hop of sourcing (#693
+ * review round 9: `.bash_profile` sourcing `.profile` sourcing `.bashrc` —
+ * the common Debian `.profile` pattern — would miss a block sitting in
+ * `.bashrc` two hops away and inject a duplicate into `.bash_profile`).
  *
- * 1. The order-based pick already carries this scope's block — the common
- *    steady state, unchanged from before.
- * 2. The order-based pick carries no block of its own, but its own content
- *    names another candidate that does — e.g. Git for Windows'
- *    `/etc/profile.d/bash_profile.sh` auto-generates `~/.bash_profile`
- *    (`test -f ~/.bashrc && . ~/.bashrc`, a plain file, not a symlink) the
- *    first time a login shell starts with `~/.bashrc` present but none of
- *    `~/.bash_profile`, `~/.bash_login` or `~/.profile`. `detectShellProfile`
- *    then prefers that newly-existing file on the *next* pull; injecting a
- *    second block there would leave the still-loading `.bashrc` one (loaded
- *    transitively through the generated forwarder) reported as a stray
- *    leftover, even though nothing ever stopped working.
- *
- * A candidate the order-based pick does not itself read is never preferred,
- * regardless of what it contains.
+ * The common real case this exists for: Git for Windows'
+ * `/etc/profile.d/bash_profile.sh` auto-generates `~/.bash_profile`
+ * (`test -f ~/.bashrc && . ~/.bashrc`, a plain file, not a symlink) the
+ * first time a login shell starts with `~/.bashrc` present but none of
+ * `~/.bash_profile`, `~/.bash_login` or `~/.profile`. `detectShellProfile`
+ * then prefers that newly-existing file on the *next* pull; without
+ * following the chain it opens, injecting a second block there would leave
+ * the still-loading `.bashrc` one reported as a stray leftover, even though
+ * nothing ever stopped working.
  */
 export async function resolveActiveShellProfile(
   envShPath: string,
@@ -236,24 +265,21 @@ export async function resolveActiveShellProfile(
   const home = getUserHome();
   const activePick = await detectShellProfile(platform);
 
-  const activeContent = await readFileSafe(activePick);
-  const activeBlock = activeContent ? extractEnvBlock(activeContent) : null;
-  if (activeBlock && envBlockReferencesDataHome(activeBlock, envShPath)) return activePick;
+  const visited = new Set<string>();
+  let current = activePick;
+  while (!visited.has(current)) {
+    visited.add(current);
+    const content = await readFileSafe(current);
+    const block = content ? extractEnvBlock(content) : null;
+    if (block && envBlockReferencesDataHome(block, envShPath)) return current;
+    if (!content) break;
 
-  if (activeContent) {
-    for (const name of SHELL_PROFILE_CANDIDATE_NAMES) {
+    const next = SHELL_PROFILE_CANDIDATE_NAMES.find((name) => {
       const candidate = path.join(home, name);
-      // A home-relative reference (`~/.bashrc`, `$HOME/.bashrc`), the shape a
-      // sourcing line actually takes — not a bare substring match, which a
-      // plain English comment mentioning the filename would also satisfy.
-      const referencesCandidate = activeContent.includes(`~/${name}`)
-        || activeContent.includes(`$HOME/${name}`)
-        || activeContent.includes('${HOME}/' + name);
-      if (candidate === activePick || !referencesCandidate) continue;
-      const content = await readFileSafe(candidate);
-      const block = content ? extractEnvBlock(content) : null;
-      if (block && envBlockReferencesDataHome(block, envShPath)) return candidate;
-    }
+      return candidate !== current && !visited.has(candidate) && referencesCandidate(content, name);
+    });
+    if (!next) break;
+    current = path.join(home, next);
   }
 
   return activePick;
