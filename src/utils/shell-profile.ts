@@ -226,15 +226,16 @@ function homeRelativePath(token: string, home: string): string | null {
   return m ? path.join(home, m[1]) : null;
 }
 
-/** Whether `statement` opens, or closes, a construct whose body is not guaranteed to run — `if`, `for`/`while`/`until`, `case`, or a function/brace group. */
+/** Whether `statement` opens, or closes, a construct whose body is not guaranteed to run — `if`, `for`/`while`/`until`, `case`, a function/brace group, or a `(...)` subshell (whose exports never reach the caller even when its body always runs — #693 review round 14). */
 function opensUnverifiedBlock(statement: string): boolean {
   return /^(?:if|for|while|until|case)\b/.test(statement)
     || /^function\s+\S/.test(statement)
     || /^\S+\s*\(\)\s*\{?\s*$/.test(statement)
-    || statement === '{';
+    || statement === '{'
+    || statement === '(';
 }
 function closesUnverifiedBlock(statement: string): boolean {
-  return /^(?:fi|done|esac)\b/.test(statement) || statement === '}';
+  return /^(?:fi|done|esac)\b/.test(statement) || statement === '}' || statement === ')';
 }
 
 /** Strips a trailing shell comment (`#` at the start of a word, outside this scanner's quote-naive view) from `line`. */
@@ -245,19 +246,62 @@ function stripComment(line: string): string {
 }
 
 /**
+ * Splits `s` on every top-level occurrence of `sep`, skipping any that fall
+ * inside single or double quotes — the naive `.split(sep)` this replaces
+ * would otherwise cut a quoted argument in half, e.g. treating the `;` in
+ * `printf '%s' 'x; source ~/.bashrc; y'` as a real statement separator and
+ * inventing an executed `source` that was actually just string data (#693
+ * review round 14). No escape handling beyond that (matching this scanner's
+ * existing quote-naive view elsewhere) — good enough to stop a quoted
+ * separator from being mistaken for a real one, not a full shell lexer.
+ */
+function splitTopLevel(s: string, sep: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let quote: string | null = null;
+  for (let i = 0; i < s.length; ) {
+    const ch = s[i];
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+      i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      i += 1;
+      continue;
+    }
+    if (s.startsWith(sep, i)) {
+      parts.push(current);
+      current = '';
+      i += sep.length;
+      continue;
+    }
+    current += ch;
+    i += 1;
+  }
+  parts.push(current);
+  return parts;
+}
+
+/**
  * Splits `content` into logical lines: strips comments, joins `\`-continued
  * lines, joins a lone `{` onto the function/construct header it opens (`fn()`
  * then `{` on its own line), and drops heredoc bodies entirely (their text is
- * data, never executed statements — #693 review round 13).
+ * data, never executed statements — #693 review round 13), tracking every
+ * terminator in order when a single command opens more than one heredoc
+ * (`cat <<A <<B`, read in the order they were opened — #693 review round 14).
  */
 function logicalLines(content: string): string[] {
   const result: string[] = [];
   const rawLines = content.split('\n');
-  let heredocEnd: string | null = null;
+  const heredocQueue: string[] = [];
 
   for (let i = 0; i < rawLines.length; i += 1) {
-    if (heredocEnd !== null) {
-      if (rawLines[i].trim() === heredocEnd) heredocEnd = null;
+    if (heredocQueue.length > 0) {
+      if (rawLines[i].trim() === heredocQueue[0]) heredocQueue.shift();
       continue;
     }
 
@@ -268,8 +312,9 @@ function logicalLines(content: string): string[] {
     }
     if (!line) continue;
 
-    const heredoc = line.match(/<<-?\s*(['"]?)(\w+)\1/);
-    if (heredoc) heredocEnd = heredoc[2];
+    for (const heredoc of line.matchAll(/<<-?\s*(['"]?)(\w+)\1/g)) {
+      heredocQueue.push(heredoc[2]);
+    }
 
     if (line === '{' && result.length > 0) {
       result[result.length - 1] += ' {';
@@ -318,32 +363,50 @@ async function referencesCandidate(content: string, name: string, home: string):
   const ref = homeRelativeRef(name);
   const refOnly = new RegExp(`^${ref}$`);
   const existenceGuard = new RegExp(`^(?:test\\s+-f\\s+${ref}|\\[\\s+-f\\s+${ref}\\s*\\])$`);
-  const sourceOf = /^(?:\.|source)\s+(\S+)$/;
+  // The target is the first whitespace-run-delimited argument; anything after
+  // it (extra positional args passed to the sourced script, a redirection
+  // like `2>/dev/null`) doesn't change whether the source itself runs (#693
+  // review round 14).
+  const sourceOf = /^(?:\.|source)\s+(\S+)(?:\s+\S.*)?$/;
 
   let depth = 0;
+  let halted = false;
   for (const line of logicalLines(content)) {
-    for (const statement of line.split(';').map((s) => s.trim()).filter(Boolean)) {
+    for (const statement of splitTopLevel(line, ';').map((s) => s.trim()).filter(Boolean)) {
       if (opensUnverifiedBlock(statement)) { depth += 1; continue; }
       if (closesUnverifiedBlock(statement)) { depth = Math.max(0, depth - 1); continue; }
       if (depth > 0) continue;
 
+      // `return`/`exit`, unconditional and at top level, ends this file's
+      // control flow right there — nothing textually after it, however it
+      // looks, ever runs (#693 review round 14).
+      if (/^(?:return|exit)(?:\s+\S+)?$/.test(statement)) { halted = true; continue; }
+      if (halted) continue;
+
       // Existence-gated `&&`: `test -f REF && . REF`, self-referential, with
       // any further `&&`-chained commands after it not affecting whether the
       // guarded source itself ran (#693 review round 13).
-      const andParts = statement.split('&&').map((s) => s.trim());
+      const andParts = splitTopLevel(statement, '&&').map((s) => s.trim());
       if (andParts.length >= 2 && existenceGuard.test(andParts[0])) {
         const guarded = andParts[1].match(sourceOf);
         if (guarded && refOnly.test(guarded[1])) return true;
       }
 
-      const orParts = statement.split('||').map((s) => s.trim());
-      if (orParts.length === 2) {
-        const left = orParts[0].match(sourceOf);
-        const right = orParts[1].match(sourceOf);
-        if (left && refOnly.test(left[1])) return true;
-        if (left && right && refOnly.test(right[1])) {
-          const leftPath = homeRelativePath(left[1], home);
-          if (leftPath && !(await pathExists(leftPath))) return true;
+      // `A || B || C || ...`: each operand is reached only if every operand
+      // before it is a recognized source of a target verifiably missing from
+      // disk (the one way a `||` fallback is guaranteed to run) — the
+      // leftmost is always attempted regardless. An operand this can't
+      // resolve one way or the other stops the chain from being trusted any
+      // further (#693 review round 14 generalized this past two operands).
+      const orParts = splitTopLevel(statement, '||').map((s) => s.trim());
+      if (orParts.length >= 2) {
+        let reachable = true;
+        for (const part of orParts) {
+          const m = part.match(sourceOf);
+          if (reachable && m && refOnly.test(m[1])) return true;
+          if (!reachable) break;
+          const p = m && homeRelativePath(m[1], home);
+          reachable = !!p && !(await pathExists(p));
         }
         continue;
       }

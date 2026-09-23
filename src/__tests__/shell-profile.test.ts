@@ -405,6 +405,79 @@ describe('resolveActiveShellProfile', () => {
     await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
     expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
   });
+
+  it('does not treat a quoted separator as a real statement boundary', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      "printf '%s\\n' 'x; source ~/.bashrc; y'\n",
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  it('does not treat a source inside a subshell as reachable', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      '(\n  source ~/.bashrc\n)\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  it('does not treat a source after an unconditional return as reachable', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'return\nsource ~/.bashrc\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  it('does not treat a source after an unconditional exit as reachable', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'exit 0\nsource ~/.bashrc\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  it('treats a source with a trailing redirection as reachable', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'source ~/.bashrc 2>/dev/null\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+  });
+
+  it('treats the last operand of a three-way || fallback as reachable when the earlier ones are missing', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'source ~/.profile || source ~/.bash_login || source ~/.bashrc\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+  });
+
+  it('does not treat the last operand of a three-way || fallback as reachable when an earlier one exists', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'source ~/.profile || source ~/.bash_login || source ~/.bashrc\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.profile'), '# unrelated\n');
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  it('does not treat a source inside the second of two heredocs on one command as reachable', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      "cat <<A <<B\nfirst\nA\nsource ~/.bashrc\nB\n",
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
 });
 
 describe('envBlockSourcesPath', () => {
