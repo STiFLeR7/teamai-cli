@@ -351,6 +351,60 @@ describe('resolveActiveShellProfile', () => {
     await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
     expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
   });
+
+  it('does not treat a source after a backslash-continued unrelated condition as reachable', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      '[ "$TERM_PROGRAM" = vscode ] && \\\nsource ~/.bashrc\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  it('does not stop recognizing later unconditional sources after a one-line if/then/fi', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'if [ -f ~/.zshrc ]; then . ~/.zshrc; fi\nsource ~/.bashrc\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+  });
+
+  it('does not stop recognizing later unconditional sources after a two-line function definition', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      'my_func()\n{\n  echo hi\n}\nsource ~/.bashrc\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+  });
+
+  it('treats an existence-gated source as reachable even with further &&-chained commands', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      '[ -f ~/.bashrc ] && . ~/.bashrc && export READY=1\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bashrc'));
+  });
+
+  it('does not treat a source inside a comment after a semicolon as reachable', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      ': # old setup; source ~/.bashrc\n',
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
+
+  it('does not treat a source inside a heredoc body as reachable', async () => {
+    await fse.writeFile(
+      path.join(homeDir, '.bash_profile'),
+      "cat <<'EOF'\nsource ~/.bashrc\nEOF\n",
+    );
+    await fse.writeFile(path.join(homeDir, '.bashrc'), teamaiBlock());
+    expect(await resolveActiveShellProfile(envShPath, 'win32')).toBe(path.join(homeDir, '.bash_profile'));
+  });
 });
 
 describe('envBlockSourcesPath', () => {

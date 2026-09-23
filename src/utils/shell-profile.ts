@@ -226,15 +226,58 @@ function homeRelativePath(token: string, home: string): string | null {
   return m ? path.join(home, m[1]) : null;
 }
 
-/** Whether `line` opens, or closes, a construct whose body is not guaranteed to run — `if`, `for`/`while`/`until`, `case`, or a function/brace group. */
-function opensUnverifiedBlock(line: string): boolean {
-  return /^(?:if|for|while|until|case)\b/.test(line)
-    || /^function\s+\S/.test(line)
-    || /^\S+\s*\(\)\s*\{?\s*$/.test(line)
-    || line === '{';
+/** Whether `statement` opens, or closes, a construct whose body is not guaranteed to run — `if`, `for`/`while`/`until`, `case`, or a function/brace group. */
+function opensUnverifiedBlock(statement: string): boolean {
+  return /^(?:if|for|while|until|case)\b/.test(statement)
+    || /^function\s+\S/.test(statement)
+    || /^\S+\s*\(\)\s*\{?\s*$/.test(statement)
+    || statement === '{';
 }
-function closesUnverifiedBlock(line: string): boolean {
-  return /^(?:fi|done|esac)\b/.test(line) || line === '}';
+function closesUnverifiedBlock(statement: string): boolean {
+  return /^(?:fi|done|esac)\b/.test(statement) || statement === '}';
+}
+
+/** Strips a trailing shell comment (`#` at the start of a word, outside this scanner's quote-naive view) from `line`. */
+function stripComment(line: string): string {
+  const at = line.search(/(?:^|\s)#/);
+  if (at === -1) return line;
+  return line.slice(0, line.indexOf('#', at)).trimEnd();
+}
+
+/**
+ * Splits `content` into logical lines: strips comments, joins `\`-continued
+ * lines, joins a lone `{` onto the function/construct header it opens (`fn()`
+ * then `{` on its own line), and drops heredoc bodies entirely (their text is
+ * data, never executed statements — #693 review round 13).
+ */
+function logicalLines(content: string): string[] {
+  const result: string[] = [];
+  const rawLines = content.split('\n');
+  let heredocEnd: string | null = null;
+
+  for (let i = 0; i < rawLines.length; i += 1) {
+    if (heredocEnd !== null) {
+      if (rawLines[i].trim() === heredocEnd) heredocEnd = null;
+      continue;
+    }
+
+    let line = stripComment(rawLines[i]).trim();
+    while (line.endsWith('\\') && !line.endsWith('\\\\')) {
+      i += 1;
+      line = `${line.slice(0, -1).trimEnd()} ${(i < rawLines.length ? stripComment(rawLines[i]) : '').trim()}`.trim();
+    }
+    if (!line) continue;
+
+    const heredoc = line.match(/<<-?\s*(['"]?)(\w+)\1/);
+    if (heredoc) heredocEnd = heredoc[2];
+
+    if (line === '{' && result.length > 0) {
+      result[result.length - 1] += ' {';
+      continue;
+    }
+    result.push(line);
+  }
+  return result;
 }
 
 /**
@@ -257,7 +300,9 @@ function closesUnverifiedBlock(line: string): boolean {
  *   be `name`, the one `&&` condition this scanner can independently verify
  *   (by visiting that candidate itself later in the search). A condition
  *   testing anything else grants nothing beyond its own unconditional left
- *   side.
+ *   side. Further `&&`-chained commands after the guarded source don't
+ *   change whether it ran, so they don't affect the match either (#693
+ *   review round 13).
  * - **`||` fallback**: `A || B`, where `A` is a source of some other
  *   candidate. `B` runs only if `A` fails, which is verifiable in exactly
  *   one case — `A`'s own target does not exist on disk — so `B` counts
@@ -272,21 +317,24 @@ function closesUnverifiedBlock(line: string): boolean {
 async function referencesCandidate(content: string, name: string, home: string): Promise<boolean> {
   const ref = homeRelativeRef(name);
   const refOnly = new RegExp(`^${ref}$`);
-  const existenceGated = new RegExp(
-    `^(?:test\\s+-f\\s+${ref}|\\[\\s+-f\\s+${ref}\\s*\\])\\s*&&\\s*(?:\\.|source)\\s+${ref}$`,
-  );
+  const existenceGuard = new RegExp(`^(?:test\\s+-f\\s+${ref}|\\[\\s+-f\\s+${ref}\\s*\\])$`);
   const sourceOf = /^(?:\.|source)\s+(\S+)$/;
 
   let depth = 0;
-  for (const rawLine of content.split('\n')) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    if (opensUnverifiedBlock(line)) { depth += 1; continue; }
-    if (closesUnverifiedBlock(line)) { depth = Math.max(0, depth - 1); continue; }
-    if (depth > 0) continue;
-
+  for (const line of logicalLines(content)) {
     for (const statement of line.split(';').map((s) => s.trim()).filter(Boolean)) {
-      if (existenceGated.test(statement)) return true;
+      if (opensUnverifiedBlock(statement)) { depth += 1; continue; }
+      if (closesUnverifiedBlock(statement)) { depth = Math.max(0, depth - 1); continue; }
+      if (depth > 0) continue;
+
+      // Existence-gated `&&`: `test -f REF && . REF`, self-referential, with
+      // any further `&&`-chained commands after it not affecting whether the
+      // guarded source itself ran (#693 review round 13).
+      const andParts = statement.split('&&').map((s) => s.trim());
+      if (andParts.length >= 2 && existenceGuard.test(andParts[0])) {
+        const guarded = andParts[1].match(sourceOf);
+        if (guarded && refOnly.test(guarded[1])) return true;
+      }
 
       const orParts = statement.split('||').map((s) => s.trim());
       if (orParts.length === 2) {
@@ -303,7 +351,7 @@ async function referencesCandidate(content: string, name: string, home: string):
       // The leftmost command before the first `&&` (if any) is always
       // attempted, same as `||`'s left side above — only its right side's
       // extra condition is unverifiable in general.
-      const andLeft = statement.split('&&')[0].trim().match(sourceOf);
+      const andLeft = andParts[0].match(sourceOf);
       if (andLeft && refOnly.test(andLeft[1])) return true;
     }
   }
