@@ -144,21 +144,28 @@ export interface ResolvedAgent extends KnownAgent {
  * skillsPath (admin can override the default location).
  */
 /**
- * Single-repo mode: seed the tool skills-directory root for the agents this
- * project should sync to, so that first-run injection actually lands.
+ * Seed the tool skills-directory root for the agents this scope should sync
+ * to, so that first-run injection actually lands.
  *
- * In git/user modes, `teamai pull` only injects into AI tools whose root dir
- * already exists (isToolInstalled) — the user "opts in" by having e.g. ~/.claude.
- * But single-repo mode's whole promise is "clone → auto-inject": a teammate's
- * fresh clone has no <repo>/.claude yet, so nothing would ever inject. Seeding
- * the dir here makes hooks + skills deploy on the first pull.
+ * `teamai pull` only injects into AI tools whose root dir already exists
+ * (isToolInstalled) — normally the user "opts in" by having e.g. ~/.claude
+ * before ever running teamai. Two cases break that assumption, and both call
+ * this to seed the dir instead of relying on it already being there:
  *
- * Which agents: strictly `localConfig.enabledAgents`. The caller decides that set
- * — interactively (multi-select in `teamai init .`), from `--agent`, or by probing
- * the user's HOME in non-interactive contexts (see detectHomeInstalledAgents).
- * We deliberately do NOT fall back to a hardcoded default here: an empty
- * enabledAgents means "create nothing", so no `.claude/` is conjured for someone
- * who never asked for it.
+ * - Single-repo mode's whole promise is "clone → auto-inject": a teammate's
+ *   fresh clone has no <repo>/.claude yet, so nothing would ever inject.
+ * - Any mode's `--agent <id>` naming a custom agent configured only in
+ *   `teamai.yaml`'s `toolPaths` (not one of the built-in tools a user
+ *   installs themselves): its root is not something anything else ever
+ *   creates, so without seeding, `--agent` would name a target `pull` can
+ *   never actually reach (#867).
+ *
+ * Which agents: strictly `localConfig.enabledAgents`. The caller decides that
+ * set — interactively (multi-select in `teamai init .`), from `--agent`, or
+ * by probing the user's HOME in non-interactive contexts (see
+ * detectHomeInstalledAgents). We deliberately do NOT fall back to a
+ * hardcoded default here: an empty enabledAgents means "create nothing", so
+ * no `.claude/` is conjured for someone who never asked for it.
  *
  * Returns the list of agent ids whose dirs were ensured.
  */

@@ -694,6 +694,16 @@ export async function initHttp(
     // state may not exist yet
   }
 
+  // Step 4.5: seed enabled agents' skills dirs before hook injection — see the
+  // matching comment in the git-mode `init` path (#867).
+  try {
+    const { seedSelfModeToolDirs } = await import('./known-agents.js');
+    const seeded = await seedSelfModeToolDirs(localConfig, teamConfig);
+    if (seeded.length > 0) log.debug(`Seeded tool dirs for: ${seeded.join(', ')}`);
+  } catch (e) {
+    log.debug(`Tool-dir seeding skipped: ${(e as Error).message}`);
+  }
+
   // Step 5: inject hooks (built-in dispatch incl. the reporter) via the same
   // authoritative path the git init uses, so HTTP consumers behave identically.
   const filterAgents = requestedAgents.length > 0 ? requestedAgents : undefined;
@@ -1964,6 +1974,23 @@ export async function init(options: GlobalOptions & {
   let stubDeployed = 0;
   if (reloadedTeamConfig) {
     const filterAgents = requestedAgents.length > 0 ? requestedAgents : undefined;
+
+    // Step 6.7: seed enabled agents' skills dirs before hook injection, same
+    // as self-mode's Step 5.3 above — an agent's root does not have to
+    // already exist to be a valid `--agent` target. Without this, a custom
+    // agent configured only in teamai.yaml's toolPaths (its root never
+    // created by anything else) was silently skipped by every pull forever,
+    // since isToolInstalled treats a missing root as "not installed" (#867).
+    // Name notwithstanding, seedSelfModeToolDirs is scope-agnostic: it uses
+    // resolveBaseDir + enabledAgents, neither of which is self-mode-specific.
+    try {
+      const { seedSelfModeToolDirs } = await import('./known-agents.js');
+      const seeded = await seedSelfModeToolDirs(localConfig, reloadedTeamConfig);
+      if (seeded.length > 0) log.debug(`Seeded tool dirs for: ${seeded.join(', ')}`);
+    } catch (e) {
+      log.debug(`Tool-dir seeding skipped: ${(e as Error).message}`);
+    }
+
     await reconcileHooksForInit(reloadedTeamConfig, localConfig, filterAgents);
 
     // Step 7.5: Deploy the built-in discovery stub immediately so the teamai

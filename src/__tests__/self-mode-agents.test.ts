@@ -158,6 +158,31 @@ describe('seedSelfModeToolDirs (no hardcoded claude default)', () => {
     expect(seeded).toEqual(['claude']);
     expect(await fse.pathExists(path.join(repoRoot, '.codex'))).toBe(false);
   });
+
+  // Despite the name, this is called from non-self-mode `init` too (#867) —
+  // resolveBaseDir + enabledAgents are not self-mode-specific, and neither is
+  // a custom agent configured only in teamai.yaml's toolPaths.
+  it('seeds a custom agent configured only in toolPaths, outside self mode', async () => {
+    const config: LocalConfig = {
+      repo: { localPath: path.join(repoRoot, '.teamai'), remote: 'r' },
+      username: 'alice',
+      scope: 'user',
+      additionalRoles: [],
+      enabledAgents: ['AA'],
+    };
+    const customTeamConfig: TeamaiConfig = {
+      ...teamConfig,
+      toolPaths: { ...teamConfig.toolPaths, AA: { skills: 'a/skills' } },
+    };
+    vi.stubEnv('HOME', repoRoot);
+
+    const seeded = await seedSelfModeToolDirs(config, customTeamConfig);
+
+    expect(seeded).toContain('AA');
+    expect(await fse.pathExists(path.join(repoRoot, 'a', 'skills'))).toBe(true);
+
+    vi.unstubAllEnvs();
+  });
 });
 
 describe('resolveSelfModeSelection (interactive picker: option 1 = Auto)', () => {
