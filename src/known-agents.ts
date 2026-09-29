@@ -8,6 +8,7 @@ import {
   isAgentDisabled,
   isSelfMode,
   scopedToolPaths,
+  toolInstallRoot,
   CLAUDE_TOOL_ID,
   detectClaudeConfigRoot,
 } from './types.js';
@@ -194,14 +195,17 @@ export async function seedSelfModeToolDirs(
     if (!selfMode && !isCustom) continue;
 
     const paths = configured[id];
-    const probePath = paths?.skills ?? paths?.rules ?? paths?.agents ?? paths?.settings ?? paths?.hooks
+    // skills/rules/agents are directories themselves — seed the dir the
+    // delivery handlers expect to already be there. settings/hooks/claudemd
+    // are FILES (e.g. "a/settings.json", "a/AGENTS.md" — see ToolPathsSchema):
+    // ensureDir-ing them directly would create a directory literally named
+    // "settings.json", so those only seed their parent tool root instead.
+    const dirPath = paths?.skills ?? paths?.rules ?? paths?.agents
       ?? KNOWN_AGENTS.find((a) => a.id === id)?.skillsPath;
-    if (!probePath) continue;
-    // Seed the actual configured resource dir (not just its root): isToolInstalled
-    // only needs toolInstallRoot(probePath) to exist, but ensureDir creates every
-    // parent along the way, and the delivery handlers expect the resource dir
-    // itself (e.g. `.claude/skills`) to already be there.
-    await ensureDir(path.join(baseDir, probePath));
+    const filePath = paths?.settings ?? paths?.hooks ?? paths?.claudemd;
+    const seedTarget = dirPath ?? (filePath ? toolInstallRoot(filePath) : undefined);
+    if (!seedTarget) continue;
+    await ensureDir(path.join(baseDir, seedTarget));
     seeded.push(id);
   }
   return seeded;

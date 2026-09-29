@@ -253,6 +253,56 @@ describe('seedSelfModeToolDirs (no hardcoded claude default)', () => {
 
     vi.unstubAllEnvs();
   });
+
+  // settings/hooks/claudemd are FILE paths (e.g. "a/settings.json"), unlike
+  // skills/rules/agents which are directories. Seeding must create their
+  // parent tool root, not a bogus directory literally named "settings.json"
+  // (#867 review finding).
+  it('seeds only the tool root for a custom agent configured with only a settings file', async () => {
+    const config: LocalConfig = {
+      repo: { localPath: path.join(repoRoot, '.teamai'), remote: 'r' },
+      username: 'alice',
+      scope: 'user',
+      additionalRoles: [],
+      enabledAgents: ['AA'],
+    };
+    const customTeamConfig: TeamaiConfig = {
+      ...teamConfig,
+      toolPaths: { ...teamConfig.toolPaths, AA: { settings: 'a/settings.json' } },
+    };
+    vi.stubEnv('HOME', repoRoot);
+
+    const seeded = await seedSelfModeToolDirs(config, customTeamConfig);
+
+    expect(seeded).toContain('AA');
+    expect(await fse.pathExists(path.join(repoRoot, 'a'))).toBe(true);
+    expect(await fse.pathExists(path.join(repoRoot, 'a', 'settings.json'))).toBe(false);
+
+    vi.unstubAllEnvs();
+  });
+
+  it('seeds a custom agent configured with only a claudemd file', async () => {
+    const config: LocalConfig = {
+      repo: { localPath: path.join(repoRoot, '.teamai'), remote: 'r' },
+      username: 'alice',
+      scope: 'user',
+      additionalRoles: [],
+      enabledAgents: ['AA'],
+    };
+    const customTeamConfig: TeamaiConfig = {
+      ...teamConfig,
+      toolPaths: { ...teamConfig.toolPaths, AA: { claudemd: 'a/AGENTS.md' } },
+    };
+    vi.stubEnv('HOME', repoRoot);
+
+    const seeded = await seedSelfModeToolDirs(config, customTeamConfig);
+
+    expect(seeded).toContain('AA');
+    expect(await fse.pathExists(path.join(repoRoot, 'a'))).toBe(true);
+    expect(await fse.pathExists(path.join(repoRoot, 'a', 'AGENTS.md'))).toBe(false);
+
+    vi.unstubAllEnvs();
+  });
 });
 
 describe('resolveSelfModeSelection (interactive picker: option 1 = Auto)', () => {
