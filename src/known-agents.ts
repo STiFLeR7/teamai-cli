@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { pathExists, ensureDir } from './utils/fs.js';
+import { pathExists, ensureDir, writeJson } from './utils/fs.js';
 import {
   COPILOT_TOOL_ID,
   getCopilotHome,
@@ -208,7 +208,11 @@ export async function seedSelfModeToolDirs(
 
     const fallbackSkills = KNOWN_AGENTS.find((a) => a.id === id)?.skillsPath;
     let ensured = await seedToolRoots(baseDir, configured[id], fallbackSkills);
-    if (seedHookRoot) ensured = (await seedToolRoots(hookScope.baseDir, hookConfigured[id], fallbackSkills)) || ensured;
+    // The HOME pass is restricted to what hook installation actually reads
+    // (settings/hooks) — seeding skills/rules/agents/claudemd there too would
+    // create a redundant directory for a tool with no settings-based hook
+    // surface (#867 review, P2).
+    if (seedHookRoot && await seedHookInstallRoot(hookScope.baseDir, hookConfigured[id])) ensured = true;
     if (ensured) seeded.push(id);
   }
   return seeded;
@@ -216,13 +220,13 @@ export async function seedSelfModeToolDirs(
 
 /**
  * Every distinct root a tool's configured resource paths imply, ensured on
- * disk. skills/rules/agents are directories themselves; settings/hooks/
- * claudemd are FILES (e.g. "a/settings.json", "a/AGENTS.md" — see
- * ToolPathsSchema), so ensureDir-ing them directly would create a directory
- * literally named "settings.json" — those seed their parent root instead. A
- * bare root-level file path (no "/", e.g. claudemd: "AGENTS.md") has no
- * parent to create — toolInstallRoot returns the path unchanged, so it is
- * skipped rather than turned into a bogus same-named directory.
+ * disk. skills/rules/agents are directories themselves; claudemd is a FILE
+ * (e.g. "a/AGENTS.md" — see ToolPathsSchema), so ensureDir-ing it directly
+ * would create a directory literally named "AGENTS.md" — a nested one seeds
+ * its parent root instead. A bare root-level claudemd (no "/") has no parent
+ * to create — its own "installed" check keys off a `.${tool}` directory
+ * convention instead (local-agent.ts), unrelated to its own path, so it is
+ * left alone here. settings/hooks are handled by seedHookInstallRoot.
  */
 async function seedToolRoots(
   baseDir: string,
@@ -231,15 +235,43 @@ async function seedToolRoots(
 ): Promise<boolean> {
   const dirPaths = [paths?.skills, paths?.rules, paths?.agents].filter((p): p is string => !!p);
   if (dirPaths.length === 0 && fallbackSkills) dirPaths.push(fallbackSkills);
-  const filePaths = [paths?.settings, paths?.hooks, paths?.claudemd].filter((p): p is string => !!p);
+  for (const dirPath of dirPaths) await ensureDir(path.join(baseDir, dirPath));
 
-  const roots = new Set(dirPaths);
-  for (const filePath of filePaths) {
-    const root = toolInstallRoot(filePath);
-    if (root !== filePath) roots.add(root);
+  let ensuredAnything = dirPaths.length > 0;
+  if (paths?.claudemd && toolInstallRoot(paths.claudemd) !== paths.claudemd) {
+    await ensureDir(path.join(baseDir, toolInstallRoot(paths.claudemd)));
+    ensuredAnything = true;
   }
-  for (const root of roots) await ensureDir(path.join(baseDir, root));
-  return roots.size > 0;
+  if (await seedHookInstallRoot(baseDir, paths)) ensuredAnything = true;
+  return ensuredAnything;
+}
+
+/**
+ * The root `reconcileHooksToAllTools`'s generic per-tool gate and doctor's
+ * own probe actually read (`paths.settings ?? paths.hooks`), ensured on disk.
+ * Nested, that's its parent directory, same as any other file-valued path.
+ * Bare (no "/"), there is no parent — the gate checks the FILE itself
+ * (`toolInstallRoot` returns a bare path unchanged) — but reconcileHooks
+ * already treats a missing settings/hooks file as `{}`, so an empty JSON
+ * object satisfies the gate and gives it something valid to merge into,
+ * instead of a bogus same-named directory.
+ */
+async function seedHookInstallRoot(
+  baseDir: string,
+  paths: ReturnType<typeof scopedToolPaths>[string] | undefined,
+): Promise<boolean> {
+  let seeded = false;
+  for (const filePath of [paths?.settings, paths?.hooks].filter((p): p is string => !!p)) {
+    const root = toolInstallRoot(filePath);
+    if (root !== filePath) {
+      await ensureDir(path.join(baseDir, root));
+    } else {
+      const full = path.join(baseDir, filePath);
+      if (!await pathExists(full)) await writeJson(full, {});
+    }
+    seeded = true;
+  }
+  return seeded;
 }
 
 /**

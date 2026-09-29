@@ -377,6 +377,65 @@ describe('seedSelfModeToolDirs (no hardcoded claude default)', () => {
 
     vi.unstubAllEnvs();
   });
+
+  // A bare root-level settings path (no "/") has no parent directory — the
+  // hook-installation gate checks the FILE itself, and reconcileHooks already
+  // treats a missing settings/hooks file as `{}`, so seed an empty JSON
+  // object there instead of leaving it (or a bogus directory) behind (#867
+  // review finding).
+  it('seeds an empty JSON file, not a directory, for a bare root-level settings path', async () => {
+    const config: LocalConfig = {
+      repo: { localPath: path.join(repoRoot, '.teamai'), remote: 'r' },
+      username: 'alice',
+      scope: 'user',
+      additionalRoles: [],
+      enabledAgents: ['AA'],
+    };
+    const customTeamConfig: TeamaiConfig = {
+      ...teamConfig,
+      toolPaths: { ...teamConfig.toolPaths, AA: { skills: 'a/skills', settings: 'settings.json' } },
+    };
+    vi.stubEnv('HOME', repoRoot);
+
+    const seeded = await seedSelfModeToolDirs(config, customTeamConfig);
+
+    expect(seeded).toContain('AA');
+    const settingsPath = path.join(repoRoot, 'settings.json');
+    expect((await fse.stat(settingsPath)).isFile()).toBe(true);
+    expect(JSON.parse(await fse.readFile(settingsPath, 'utf-8'))).toEqual({});
+
+    vi.unstubAllEnvs();
+  });
+
+  // The HOME hook-scope pass must be restricted to what hook installation
+  // actually reads (settings/hooks) — seeding skills/rules/agents there too
+  // would create a directory a tool with no settings-based hook surface never
+  // needs (#867 review finding, P2).
+  it('does not seed skills/rules/agents at the HOME hook-scope root when the tool has no settings path', async () => {
+    const home = path.join(tmp, 'home');
+    await fse.ensureDir(home);
+    const config: LocalConfig = {
+      repo: { localPath: path.join(repoRoot, '.teamai'), remote: 'r' },
+      username: 'alice',
+      scope: 'project',
+      projectRoot: repoRoot,
+      additionalRoles: [],
+      enabledAgents: ['AA'],
+    };
+    const customTeamConfig: TeamaiConfig = {
+      ...teamConfig,
+      toolPaths: { ...teamConfig.toolPaths, AA: { skills: '.aa/skills' } },
+    };
+    vi.stubEnv('HOME', home);
+
+    const seeded = await seedSelfModeToolDirs(config, customTeamConfig);
+
+    expect(seeded).toContain('AA');
+    expect(await fse.pathExists(path.join(repoRoot, '.aa', 'skills'))).toBe(true);
+    expect(await fse.pathExists(path.join(home, '.aa'))).toBe(false);
+
+    vi.unstubAllEnvs();
+  });
 });
 
 describe('resolveSelfModeSelection (interactive picker: option 1 = Auto)', () => {
