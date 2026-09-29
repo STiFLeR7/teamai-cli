@@ -7,6 +7,7 @@ import {
   resolveToolBaseDir,
   isAgentDisabled,
   isSelfMode,
+  resolveHookScope,
   scopedToolPaths,
   toolInstallRoot,
   CLAUDE_TOOL_ID,
@@ -181,9 +182,20 @@ export async function seedSelfModeToolDirs(
   localConfig: LocalConfig,
   teamConfig: TeamaiConfig,
 ): Promise<string[]> {
+  const selfMode = isSelfMode(localConfig);
   const baseDir = resolveBaseDir(localConfig);
   const configured = scopedToolPaths(teamConfig, localConfig);
-  const selfMode = isSelfMode(localConfig);
+
+  // Non-self project scope injects hooks into HOME, not the project root
+  // (`resolveHookScope`, #264): `~/.claude` always exists for a built-in tool,
+  // so that gate passes, but a custom tool's HOME root is not something
+  // anything else creates either. Seed there too when it differs, or the
+  // custom agent's session-start hook is silently skipped (#867 review).
+  const hookScope = resolveHookScope(localConfig);
+  const seedHookRoot = hookScope.baseDir !== baseDir;
+  const hookConfigured = seedHookRoot
+    ? scopedToolPaths(teamConfig, { ...localConfig, scope: hookScope.scope })
+    : configured;
 
   let targets = localConfig.enabledAgents ?? [];
   // Never seed an explicitly disabled agent.
@@ -194,21 +206,40 @@ export async function seedSelfModeToolDirs(
     const isCustom = !KNOWN_AGENTS.some((a) => a.id === id);
     if (!selfMode && !isCustom) continue;
 
-    const paths = configured[id];
-    // skills/rules/agents are directories themselves — seed the dir the
-    // delivery handlers expect to already be there. settings/hooks/claudemd
-    // are FILES (e.g. "a/settings.json", "a/AGENTS.md" — see ToolPathsSchema):
-    // ensureDir-ing them directly would create a directory literally named
-    // "settings.json", so those only seed their parent tool root instead.
-    const dirPath = paths?.skills ?? paths?.rules ?? paths?.agents
-      ?? KNOWN_AGENTS.find((a) => a.id === id)?.skillsPath;
-    const filePath = paths?.settings ?? paths?.hooks ?? paths?.claudemd;
-    const seedTarget = dirPath ?? (filePath ? toolInstallRoot(filePath) : undefined);
-    if (!seedTarget) continue;
-    await ensureDir(path.join(baseDir, seedTarget));
-    seeded.push(id);
+    const fallbackSkills = KNOWN_AGENTS.find((a) => a.id === id)?.skillsPath;
+    let ensured = await seedToolRoots(baseDir, configured[id], fallbackSkills);
+    if (seedHookRoot) ensured = (await seedToolRoots(hookScope.baseDir, hookConfigured[id], fallbackSkills)) || ensured;
+    if (ensured) seeded.push(id);
   }
   return seeded;
+}
+
+/**
+ * Every distinct root a tool's configured resource paths imply, ensured on
+ * disk. skills/rules/agents are directories themselves; settings/hooks/
+ * claudemd are FILES (e.g. "a/settings.json", "a/AGENTS.md" — see
+ * ToolPathsSchema), so ensureDir-ing them directly would create a directory
+ * literally named "settings.json" — those seed their parent root instead. A
+ * bare root-level file path (no "/", e.g. claudemd: "AGENTS.md") has no
+ * parent to create — toolInstallRoot returns the path unchanged, so it is
+ * skipped rather than turned into a bogus same-named directory.
+ */
+async function seedToolRoots(
+  baseDir: string,
+  paths: ReturnType<typeof scopedToolPaths>[string] | undefined,
+  fallbackSkills?: string,
+): Promise<boolean> {
+  const dirPaths = [paths?.skills, paths?.rules, paths?.agents].filter((p): p is string => !!p);
+  if (dirPaths.length === 0 && fallbackSkills) dirPaths.push(fallbackSkills);
+  const filePaths = [paths?.settings, paths?.hooks, paths?.claudemd].filter((p): p is string => !!p);
+
+  const roots = new Set(dirPaths);
+  for (const filePath of filePaths) {
+    const root = toolInstallRoot(filePath);
+    if (root !== filePath) roots.add(root);
+  }
+  for (const root of roots) await ensureDir(path.join(baseDir, root));
+  return roots.size > 0;
 }
 
 /**

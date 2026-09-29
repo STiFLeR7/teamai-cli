@@ -303,6 +303,80 @@ describe('seedSelfModeToolDirs (no hardcoded claude default)', () => {
 
     vi.unstubAllEnvs();
   });
+
+  it('seeds every distinct configured root, not just the first one found', async () => {
+    const config: LocalConfig = {
+      repo: { localPath: path.join(repoRoot, '.teamai'), remote: 'r' },
+      username: 'alice',
+      scope: 'user',
+      additionalRoles: [],
+      enabledAgents: ['AA'],
+    };
+    const customTeamConfig: TeamaiConfig = {
+      ...teamConfig,
+      toolPaths: { ...teamConfig.toolPaths, AA: { skills: 'a/skills', rules: 'b/rules' } },
+    };
+    vi.stubEnv('HOME', repoRoot);
+
+    const seeded = await seedSelfModeToolDirs(config, customTeamConfig);
+
+    expect(seeded).toContain('AA');
+    expect(await fse.pathExists(path.join(repoRoot, 'a', 'skills'))).toBe(true);
+    expect(await fse.pathExists(path.join(repoRoot, 'b', 'rules'))).toBe(true);
+
+    vi.unstubAllEnvs();
+  });
+
+  it('does not create a bogus directory for a bare root-level file path', async () => {
+    const config: LocalConfig = {
+      repo: { localPath: path.join(repoRoot, '.teamai'), remote: 'r' },
+      username: 'alice',
+      scope: 'user',
+      additionalRoles: [],
+      enabledAgents: ['AA'],
+    };
+    const customTeamConfig: TeamaiConfig = {
+      ...teamConfig,
+      toolPaths: { ...teamConfig.toolPaths, AA: { claudemd: 'AGENTS.md' } },
+    };
+    vi.stubEnv('HOME', repoRoot);
+
+    await seedSelfModeToolDirs(config, customTeamConfig);
+
+    expect(await fse.pathExists(path.join(repoRoot, 'AGENTS.md'))).toBe(false);
+
+    vi.unstubAllEnvs();
+  });
+
+  // Non-self project scope injects hooks into HOME, not the project root
+  // (resolveHookScope, #264): a custom tool's HOME root must exist too, or
+  // its session-start hook is silently skipped even though its resource dirs
+  // landed correctly under the project root (#867 review finding).
+  it('also seeds the HOME hook-scope root in non-self project scope', async () => {
+    const home = path.join(tmp, 'home');
+    await fse.ensureDir(home);
+    const config: LocalConfig = {
+      repo: { localPath: path.join(repoRoot, '.teamai'), remote: 'r' },
+      username: 'alice',
+      scope: 'project',
+      projectRoot: repoRoot,
+      additionalRoles: [],
+      enabledAgents: ['AA'],
+    };
+    const customTeamConfig: TeamaiConfig = {
+      ...teamConfig,
+      toolPaths: { ...teamConfig.toolPaths, AA: { skills: '.aa/skills', settings: '.aa/settings.json' } },
+    };
+    vi.stubEnv('HOME', home);
+
+    const seeded = await seedSelfModeToolDirs(config, customTeamConfig);
+
+    expect(seeded).toContain('AA');
+    expect(await fse.pathExists(path.join(repoRoot, '.aa', 'skills'))).toBe(true);
+    expect(await fse.pathExists(path.join(home, '.aa'))).toBe(true);
+
+    vi.unstubAllEnvs();
+  });
 });
 
 describe('resolveSelfModeSelection (interactive picker: option 1 = Auto)', () => {
