@@ -2323,7 +2323,7 @@ teamai init --repo https://github.com/yourorg/yourrepo --force
 
 **Q: 在项目里执行 `teamai init` 后没有 `.claude/`（或 `.cursor/`、`.codebuddy/`）目录？**
 
-这是预期行为。`init` 不知道你会打开哪个 Agent。在项目中打开 Claude Code / Cursor / CodeBuddy：SessionStart hook 会创建该工具的项目根目录并随后 pull。单独执行 `teamai pull` 不会为缺失的 Agent 根目录建目录。
+对内置工具而言这是预期行为：`init` 不知道你会打开哪个 Agent。在项目中打开 Claude Code / Cursor / CodeBuddy：SessionStart hook 会创建该工具的项目根目录并随后 pull。单独执行 `teamai pull` 不会为缺失的 Agent 根目录建目录。例外是仅在 `teamai.yaml` 的 `toolPaths` 中定义的自定义 Agent（不属于内置工具）——`init --agent <id>` 会自行创建该 Agent 的根目录，因为没有其他流程会为它创建。
 
 **Q: Hooks 没有自动触发？**
 

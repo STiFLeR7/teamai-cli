@@ -6,6 +6,7 @@ import {
   resolveBaseDir,
   resolveToolBaseDir,
   isAgentDisabled,
+  isSelfMode,
   scopedToolPaths,
   CLAUDE_TOOL_ID,
   detectClaudeConfigRoot,
@@ -160,6 +161,12 @@ export interface ResolvedAgent extends KnownAgent {
  *   creates, so without seeding, `--agent` would name a target `pull` can
  *   never actually reach (#867).
  *
+ * Outside self mode, only the second case applies: a built-in tool (one
+ * KNOWN_AGENTS already lists) is left alone even if enabled, since its root
+ * already existing is exactly what `doctor`'s "is installed" check verifies
+ * (#598) — seeding it here would silently manufacture a directory for
+ * software that was never actually installed.
+ *
  * Which agents: strictly `localConfig.enabledAgents`. The caller decides that
  * set — interactively (multi-select in `teamai init .`), from `--agent`, or
  * by probing the user's HOME in non-interactive contexts (see
@@ -174,7 +181,8 @@ export async function seedSelfModeToolDirs(
   teamConfig: TeamaiConfig,
 ): Promise<string[]> {
   const baseDir = resolveBaseDir(localConfig);
-  const configured = teamConfig.toolPaths ?? {};
+  const configured = scopedToolPaths(teamConfig, localConfig);
+  const selfMode = isSelfMode(localConfig);
 
   let targets = localConfig.enabledAgents ?? [];
   // Never seed an explicitly disabled agent.
@@ -182,10 +190,18 @@ export async function seedSelfModeToolDirs(
 
   const seeded: string[] = [];
   for (const id of targets) {
-    const skillsPath = configured[id]?.skills
+    const isCustom = !KNOWN_AGENTS.some((a) => a.id === id);
+    if (!selfMode && !isCustom) continue;
+
+    const paths = configured[id];
+    const probePath = paths?.skills ?? paths?.rules ?? paths?.agents ?? paths?.settings ?? paths?.hooks
       ?? KNOWN_AGENTS.find((a) => a.id === id)?.skillsPath;
-    if (!skillsPath) continue;
-    await ensureDir(path.join(baseDir, skillsPath));
+    if (!probePath) continue;
+    // Seed the actual configured resource dir (not just its root): isToolInstalled
+    // only needs toolInstallRoot(probePath) to exist, but ensureDir creates every
+    // parent along the way, and the delivery handlers expect the resource dir
+    // itself (e.g. `.claude/skills`) to already be there.
+    await ensureDir(path.join(baseDir, probePath));
     seeded.push(id);
   }
   return seeded;

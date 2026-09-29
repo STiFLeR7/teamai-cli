@@ -183,6 +183,76 @@ describe('seedSelfModeToolDirs (no hardcoded claude default)', () => {
 
     vi.unstubAllEnvs();
   });
+
+  // Outside self mode, a built-in tool's root must already exist on its own —
+  // that's exactly what doctor's "is installed" check verifies (#598).
+  // Seeding it here would silently create a directory for software that was
+  // never actually installed (#867 review finding).
+  it('does not seed a built-in tool outside self mode, even if enabled', async () => {
+    const config: LocalConfig = {
+      repo: { localPath: path.join(repoRoot, '.teamai'), remote: 'r' },
+      username: 'alice',
+      scope: 'user',
+      additionalRoles: [],
+      enabledAgents: ['claude'],
+    };
+    vi.stubEnv('HOME', repoRoot);
+
+    const seeded = await seedSelfModeToolDirs(config, teamConfig);
+
+    expect(seeded).toEqual([]);
+    expect(await fse.pathExists(path.join(repoRoot, '.claude'))).toBe(false);
+
+    vi.unstubAllEnvs();
+  });
+
+  it('seeds the user-scope override path, not the default, when scope is user', async () => {
+    const config: LocalConfig = {
+      repo: { localPath: path.join(repoRoot, '.teamai'), remote: 'r' },
+      username: 'alice',
+      scope: 'user',
+      additionalRoles: [],
+      enabledAgents: ['AA'],
+    };
+    const customTeamConfig: TeamaiConfig = {
+      ...teamConfig,
+      toolPaths: {
+        ...teamConfig.toolPaths,
+        AA: { skills: '.aa/skills', userScope: { skills: '.config/aa/skills' } },
+      },
+    };
+    vi.stubEnv('HOME', repoRoot);
+
+    const seeded = await seedSelfModeToolDirs(config, customTeamConfig);
+
+    expect(seeded).toContain('AA');
+    expect(await fse.pathExists(path.join(repoRoot, '.config/aa/skills'))).toBe(true);
+    expect(await fse.pathExists(path.join(repoRoot, '.aa'))).toBe(false);
+
+    vi.unstubAllEnvs();
+  });
+
+  it('seeds a custom agent configured with only a rules path, no skills', async () => {
+    const config: LocalConfig = {
+      repo: { localPath: path.join(repoRoot, '.teamai'), remote: 'r' },
+      username: 'alice',
+      scope: 'user',
+      additionalRoles: [],
+      enabledAgents: ['AA'],
+    };
+    const customTeamConfig: TeamaiConfig = {
+      ...teamConfig,
+      toolPaths: { ...teamConfig.toolPaths, AA: { rules: 'a/rules' } },
+    };
+    vi.stubEnv('HOME', repoRoot);
+
+    const seeded = await seedSelfModeToolDirs(config, customTeamConfig);
+
+    expect(seeded).toContain('AA');
+    expect(await fse.pathExists(path.join(repoRoot, 'a', 'rules'))).toBe(true);
+
+    vi.unstubAllEnvs();
+  });
 });
 
 describe('resolveSelfModeSelection (interactive picker: option 1 = Auto)', () => {
