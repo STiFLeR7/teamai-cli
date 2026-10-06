@@ -52,9 +52,13 @@ describe('--dry-run guard decisions', () => {
 
   it.each([
     'remove', 'roles init', 'roles add', 'roles remove', 'roles update',
-    'projects add', 'projects update', 'projects remove', 'stats', 'digest', 'recall',
+    'projects add', 'projects update', 'projects remove', 'digest',
   ])('refuses %s until its writes have a preview', (path) => {
     expect(dryRunRefusal(command(path))).toBe(`teamai ${path} has no --dry-run preview, nothing was run`);
+  });
+
+  it.each(['stats', 'recall'])('previews %s now that #970 landed', (path) => {
+    expect(dryRunRefusal(command(path))).toBeUndefined();
   });
 
   it.each(['--from-repo', '--from-repo-list', '--from-iwiki', '--from-claude'])('refuses import %s', (flag) => {

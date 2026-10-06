@@ -67,12 +67,14 @@ export const DRY_RUN_PREVIEW: ReadonlySet<string> = new Set([
   'models restore',
   'session save',
   'contribute',
+  'recall',
   'recall feedback',
   'recall disable',
   'recall enable',
   'recall status',
   'recall maintenance',
   'recall promote',
+  'stats',
   'import', // source-specific refusals below
   'codebase', // `--extract` is refused below
   'review',
@@ -93,8 +95,6 @@ export const NO_DRY_RUN_PREVIEW: Readonly<Record<string, string>> = {
   'projects add': 'pulls the team repo before its preview until #971 lands',
   'projects update': 'pulls the team repo before its preview until #971 lands',
   'projects remove': 'pulls the team repo before its preview until #971 lands',
-  stats: 'creates or refreshes the reports worktree until #970 lands',
-  recall: 'writes recall quality and the search index until #970 lands',
   digest: 'creates or refreshes the reports worktree; #900 C11',
   init: 'no preview; clones, saves config and injects hooks (single-repo: bootstraps the clone)',
   'models add': 'writes the personal profile and its key',
