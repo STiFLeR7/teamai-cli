@@ -359,10 +359,11 @@ const SUBAGENT_STOP_TOOLS = new Set([
 /**
  * Build the built-in hook definitions for a tool.
  *
- * Tool-specific by design: Cursor, WorkBuddy and CodeBuddy entries carry
- * per-hook timeouts so a slow/unreachable backend hook cannot hang the host;
- * only Claude/Codex entries carry no timeout. The reconcile engine renders the
- * same HookDef into each tool's on-disk shape.
+ * Tool-specific by design: Cursor, WorkBuddy, CodeBuddy and the Codex family
+ * entries carry per-hook timeouts so a slow dispatch cannot hang the host (or,
+ * for Codex, get killed by its own shorter default instead — #1070); only
+ * Claude entries carry no timeout. The reconcile engine renders the same
+ * HookDef into each tool's on-disk shape.
  *
  * GUI tools (WorkBuddy, CodeBuddy) use the wrapper dispatch command so their
  * hook subprocesses can find `teamai` even without the user's full PATH. Both
@@ -376,7 +377,7 @@ const WRAPPER_TOOLS = SHELL_DEPENDENT_TOOLS;
 export function builtinHookDefs(tool: string): HookDef[] {
   // ZCode renders per-event timeouts from the ZCODE_TIMEOUT_MS table in its own
   // writer (toZcodeEntry), so def.timeout stays unset for it.
-  const withTimeout = tool === 'cursor' || tool === 'copilot' || tool === 'workbuddy' || tool === 'codebuddy';
+  const withTimeout = tool === 'cursor' || tool === 'copilot' || tool === 'workbuddy' || tool === 'codebuddy' || isCodexTool(tool);
   const buildCommand = tool === 'zcode'
     ? getRawDispatchCommand
     : toolUsesPwshShell(tool)

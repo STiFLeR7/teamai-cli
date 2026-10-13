@@ -59,11 +59,16 @@ describe('builtinHookDefs — unified built-in hook model', () => {
     expect(builtinHookDefs('claude').some((d) => d.event === 'SessionEnd')).toBe(false);
   });
 
-  it('Claude defs carry no timeout; Cursor defs carry per-hook timeouts', () => {
+  it('Claude defs carry no timeout; Cursor and the Codex family carry per-hook timeouts (#1070)', () => {
     expect(builtinHookDefs('claude').every((d) => d.timeout === undefined)).toBe(true);
     const cursor = builtinHookDefs('cursor');
     expect(cursor.find((d) => d.key === 'Hook dispatch session-start')?.timeout).toBe(15);
     expect(cursor.find((d) => d.key === 'Hook dispatch post-tool-use TodoWrite')?.timeout).toBe(3);
+    for (const tool of ['codex', 'codex-internal', 'tcodex']) {
+      const codex = builtinHookDefs(tool);
+      expect(codex.find((d) => d.key === 'Hook dispatch session-start')?.timeout).toBe(15);
+      expect(codex.find((d) => d.key === 'Hook dispatch post-tool-use TodoWrite')?.timeout).toBe(3);
+    }
   });
 
   it('embeds the --tool identifier and [teamai] description marker', () => {
